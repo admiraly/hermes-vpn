@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "signaling": [
+    { "name": "EU — Frankfurt", "address": "wss://eu1.example.net/v1" },
+    { "name": "US — Chicago", "address": "wss://us1.example.net/v1" }
+  ],
+  "relays": [
+    { "name": "EU — Frankfurt relay", "address": "eu1.example.net:8788" },
+    { "name": "US — Chicago relay", "address": "us1.example.net:8788" }
+  ]
+}

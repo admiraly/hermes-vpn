@@ -1,0 +1,17 @@
+[package]
+name = "hermes-relay"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hermes central relay server — forwards end-to-end encrypted room traffic between peers"
+
+[dependencies]
+hermes-core = { path = "../hermes-core" }
+
+tokio.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+uuid.workspace = true

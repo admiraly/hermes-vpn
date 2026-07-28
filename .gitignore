@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+
+# Tauri
+hermes-ui/src-tauri/gen/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local runtime artifacts
+*.log

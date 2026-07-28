@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Engine + servers (the non-UI crates) on both platforms. This is the
+  # job that finally compiles the Linux-only code paths (tap/linux.rs,
+  # Unix-socket IPC) that no Windows dev build ever touches.
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      # Deny warnings in our own crates. Cargo caps lints on registry
+      # dependencies, so this only gates the workspace.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
+      - name: Build (excluding the Tauri UI crate)
+        run: cargo build --workspace --exclude hermes-ui --locked
+
+      - name: Test (excluding the Tauri UI crate)
+        run: cargo test --workspace --exclude hermes-ui --locked
+
+      # Informational: the crate opts into clippy::pedantic, which is
+      # intentionally noisy. Surface suggestions without failing the build.
+      - name: Clippy (informational)
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --exclude hermes-ui --all-targets
+
+  # Frontend type-check + bundle. Catches TypeScript and Vite errors and
+  # produces the dist/ the Tauri crate embeds.
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: hermes-ui/package-lock.json
+      - name: Install deps
+        working-directory: hermes-ui
+        run: npm ci
+      - name: Build frontend (tsc + vite)
+        working-directory: hermes-ui
+        run: npm run build
+
+  # Build the full Tauri desktop app on Windows, where the webview is
+  # built in (no system GTK/WebKit packages to install). Proves the
+  # Rust UI backend integrates with the daemon + core end to end.
+  tauri:
+    name: tauri (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: hermes-ui/package-lock.json
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build frontend
+        working-directory: hermes-ui
+        run: npm ci && npm run build
+      - name: Build Tauri app
+        run: cargo build -p hermes-ui --locked

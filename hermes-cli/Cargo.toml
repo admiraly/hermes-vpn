@@ -1,0 +1,18 @@
+[package]
+name = "hermes-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line control client for the Hermes daemon (create/join rooms, inspect status) — a GUI-free way to drive a node"
+
+[[bin]]
+name = "hermes"
+path = "src/main.rs"
+
+[dependencies]
+hermes-core = { path = "../hermes-core" }
+hermes-daemon = { path = "../hermes-daemon" }
+
+tokio.workspace = true
+anyhow.workspace = true
