@@ -26,6 +26,12 @@ Runtime requirements:
 - The **daemon** needs `CAP_NET_ADMIN` for the TUN/TAP adapter:
   `sudo setcap cap_net_admin=+ep target/release/hermes-daemon`
   (or just run it with `sudo`). The `tun` kernel module must be loaded.
+  Note `setcap` genuinely suffices: the adapter's MAC, address, and link
+  state are configured over netlink from inside the process. It must stay
+  that way — capabilities are not inherited across `exec`, so shelling out
+  to `ip` would silently break the unprivileged path even though the device
+  itself gets created. Re-run `setcap` after replacing the binary; it is
+  cleared on write.
 - `hermes-signaling` and `hermes-relay` are plain unprivileged binaries.
 
 ## Windows

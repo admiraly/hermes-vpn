@@ -8,6 +8,17 @@ public release, **P2+** improvements and future features.
 
 ## ✅ Done & verified (v2 baseline)
 
+> **Accuracy note (2026-08-13).** This section was written against the tree
+> that the `SALVAGE: partial transcript reconstruction` commit only partly
+> preserved, and some of its claims do not describe the current repository.
+> In particular: the "43 tests, all green on Windows" suite no longer exists
+> in that form (`hermes-relay/tests/relay_e2e.rs` survived as imports and a
+> struct with zero test functions, and has been rewritten); and the `dist/`
+> binaries referenced below were never in the repo, since `dist/` is
+> gitignored. Treat any claim here as unverified unless it also appears
+> under P0–P6 with a date. Current, measured state: 63 tests passing, builds
+> clean on Linux and cross-compiles to Windows.
+
 - [x] Dual room modes: pure P2P and central-server (relayed), chosen at
       room creation, distributed to all members by the signaling server
 - [x] `hermes-relay` central server: Ed25519-authenticated registration,
@@ -62,19 +73,45 @@ public release, **P2+** improvements and future features.
       before tunnels form — but verify connection-setup latency on the
       two-machine test; if slow, have the relay briefly queue one packet
       per unknown dest.
-- [ ] **Real two-machine smoke test, both modes.** All automation so far is
-      loopback. Run daemon+UI on two separate hosts behind real NAT:
-      verify a P2P room actually hole-punches and a relayed room forwards.
+- [x] **Real two-machine smoke test, both modes.** Run 2026-08-13 between a
+      Windows Server 2022 host and a Linux host (separate EC2 instances,
+      traffic over the public internet via a hosted relay). Relayed room:
+      ping 4/4 both directions, ~1.6 ms RTT, WireGuard handshake completed
+      cross-platform, ARP resolved through the wintun shim. P2P room with a
+      fallback relay: the direct path failed and `probe_and_tunnel`
+      automatically failed over to the relay, traffic uninterrupted.
+      This test found the two bugs below, both invisible to loopback.
+      **Still unproven: genuine direct P2P.** Every hole-punch attempt fell
+      back to the relay because AWS security groups block arbitrary UDP
+      between instances — STUN, UPnP, and hole punching remain untested
+      against real consumer NAT, which two cloud VMs poorly approximate.
+
+- [x] **TAP interface MAC was never set (Linux).** `tap/linux.rs` left the
+      kernel's random MAC in place while `AdapterConfig.mac` carried the
+      `VirtualMac` derived from the node's public key — the address every
+      peer sends unicast frames to. The kernel dropped them all as "not for
+      me", defeating the premise of [crypto/mac.rs](hermes-core/src/crypto/mac.rs).
+      It presented as "ARP resolves, nothing else works": the ARP request is
+      broadcast and the reply comes back to the *real* MAC, so the link
+      looks healthy while carrying no unicast at all. Now set over netlink,
+      with the device created down first (MAC → IP → up) since drivers can
+      refuse an address change on a live link.
+
+- [x] **`setcap` could never have worked.** The adapter was configured by
+      shelling out to `ip addr add`, and file capabilities are not inherited
+      across `exec` — so a daemon granted `CAP_NET_ADMIN` created the TUN
+      device in-process successfully and then failed to address it with
+      `EPERM`. BUILDING.md documented this route as though it worked.
+      Interface configuration now goes through in-process netlink
+      (`rtnetlink`); verified running unprivileged as a normal user.
 
 ## P1 — platform & packaging (needed for a release)
 
-- [~] **Build & test on Linux.** The full workspace (minus the Tauri UI)
-      **compiles cleanly on Linux** — verified by a native build in a Linux
-      Docker container that produced the `dist/linux` binaries, exercising
-      `tap/linux.rs` and the Unix-socket IPC for the first time. Still
-      pending: running `cargo test` on a Linux host (the CI job in
-      [.github/workflows/ci.yml](.github/workflows/ci.yml) does this on
-      every push once the repo is on GitHub) and a real Linux runtime test.
+- [x] **Build & test on Linux.** The full workspace (minus the Tauri UI)
+      builds, is rustfmt-clean, passes `RUSTFLAGS=-D warnings`, and runs its
+      whole suite (63 tests) on a Linux host. A real Linux runtime test is
+      done too: the daemon brings up a TAP adapter, joins a relayed room,
+      and carries traffic — unprivileged, via `setcap`.
 - [ ] **Bundle `wintun.dll`** with the Windows build/installer (must sit
       next to `hermes-daemon.exe`); document or automate the copy.
 - [ ] **Daemon lifecycle / service install.** Today the daemon is launched
@@ -89,7 +126,14 @@ public release, **P2+** improvements and future features.
       - **Windows:** a non-elevated UI may be unable to open the elevated
         daemon's named pipe (default pipe ACL). Workaround is running the
         UI elevated too; the fix is a permissive-but-safe pipe security
-        descriptor (or a proper service + client identity check).
+        descriptor (or a proper service + client identity check). Note the
+        2026-08-13 two-machine test ran the client elevated, so this path
+        is still unexercised.
+      - **Windows, detaching:** the daemon is not a service binary, so the
+        SCM kills it. Windows OpenSSH also kills its session's whole process
+        tree on logout, which defeats `Start-Process`. What worked for
+        testing was `Invoke-CimMethod Win32_Process Create`, which spawns
+        outside the job object; `schtasks` did not.
 - [ ] **Real app icons & branding** — replace the generated placeholder
       [icons](hermes-ui/src-tauri/icons) with real artwork; add `.icns` if
       macOS is ever targeted.
