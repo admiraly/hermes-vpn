@@ -45,3 +45,4 @@ wintun = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 tokio-tun = "=0.12.1"
+rtnetlink.workspace = true
