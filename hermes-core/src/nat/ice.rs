@@ -46,14 +46,21 @@ pub async fn probe_candidates(
     ))
 }
 
+/// The hole-punching probe datagram.
+///
+/// A fixed 4-byte magic: a peer that receives it echoes it straight back,
+/// which is how [`probe_candidates`] learns that a candidate pair works.
+/// The echo is sent by the mesh's inbound demultiplexer
+/// ([`crate::mesh::Mesh::dispatch_inbound`]), because the probe arrives on
+/// the same shared UDP socket that carries WireGuard traffic.
+pub const PROBE_MAGIC: &[u8; 4] = b"HRM1";
+
 async fn probe_one(
     socket: &UdpSocket,
     candidate: &Candidate,
     budget: Duration,
 ) -> Result<TraversalResult> {
-    // The handshake datagram is a fixed 4-byte magic. Peers looking for
-    // the same room echo it back.
-    const MAGIC: &[u8; 4] = b"HRM1";
+    const MAGIC: &[u8; 4] = PROBE_MAGIC;
 
     socket.send_to(MAGIC, candidate.address).await?;
 

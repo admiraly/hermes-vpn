@@ -46,7 +46,10 @@ async fn wait_for_health(
             return;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for health={want} ({what})");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for health={want} ({what})"
+        );
         let _ = timeout(remaining, rx.changed()).await;
     }
 }

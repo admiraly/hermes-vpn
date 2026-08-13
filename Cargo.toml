@@ -6,8 +6,12 @@ members = [
     "hermes-relay",
     "hermes-signaling",
     "hermes-cli",
-    "hermes-ui/src-tauri",
 ]
+
+# hermes-ui/src-tauri is intentionally out of the workspace: the Tauri app
+# embeds a bundled JS frontend at compile time, which needs a Node toolchain.
+# The React sources remain under hermes-ui/ but are not built here.
+exclude = ["hermes-ui/src-tauri"]
 
 [workspace.package]
 version = "0.2.0"
@@ -51,6 +55,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # WireGuard
 boringtun = "0.7"
+
+# Netlink (Linux interface configuration, in-process so CAP_NET_ADMIN suffices)
+rtnetlink = "0.14"
 
 # NAT traversal
 igd-next = "0.14"    # UPnP

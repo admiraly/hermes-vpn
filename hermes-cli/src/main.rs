@@ -129,9 +129,16 @@ async fn servers() -> Result<()> {
     let ResponseBody::Servers(list) = c.call(CommandPayload::GetServers).await? else {
         bail!("unexpected response");
     };
-    println!("signaling servers (active: {}):", list.active_signaling.as_deref().unwrap_or("<first>"));
+    println!(
+        "signaling servers (active: {}):",
+        list.active_signaling.as_deref().unwrap_or("<first>")
+    );
     for s in &list.signaling {
-        let active = if list.active_signaling.as_deref() == Some(&s.name) { "*" } else { " " };
+        let active = if list.active_signaling.as_deref() == Some(&s.name) {
+            "*"
+        } else {
+            " "
+        };
         println!("  {active} {:20} {:?}  {}", s.name, s.source, s.address);
     }
     println!("relay servers:");
@@ -200,7 +207,10 @@ async fn create(args: &[String]) -> Result<()> {
 
     let c = client().await?;
     // Subscribe before issuing the command so we don't miss the event.
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     expect_ok(
         c.call(CommandPayload::CreateRoom {
             name: (*name).to_string(),
@@ -219,7 +229,10 @@ async fn join(args: &[String]) -> Result<()> {
         bail!("usage: join <INVITE-CODE>");
     };
     let c = client().await?;
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     expect_ok(
         c.call(CommandPayload::JoinRoom {
             code: (*code).to_uppercase(),
@@ -230,9 +243,7 @@ async fn join(args: &[String]) -> Result<()> {
 }
 
 /// Wait for the daemon to confirm room entry (or surface a signaling error).
-async fn wait_for_room(
-    events: &mut tokio::sync::mpsc::Receiver<Event>,
-) -> Result<()> {
+async fn wait_for_room(events: &mut tokio::sync::mpsc::Receiver<Event>) -> Result<()> {
     loop {
         match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
             Ok(Some(Event::RoomEntered {
@@ -241,7 +252,10 @@ async fn wait_for_room(
                 relay_addr,
                 ..
             })) => {
-                println!("in room — mode {mode:?}{}", relay_addr.map_or(String::new(), |r| format!(", relay {r}")));
+                println!(
+                    "in room — mode {mode:?}{}",
+                    relay_addr.map_or(String::new(), |r| format!(", relay {r}"))
+                );
                 if let Some(code) = invite_code {
                     println!("INVITE CODE: {code}");
                     println!("(share this with the other machine, then run: hermes join {code})");
@@ -253,7 +267,9 @@ async fn wait_for_room(
             }
             Ok(Some(_)) => {} // some other event; keep waiting
             Ok(None) => bail!("daemon closed the connection"),
-            Err(_) => bail!("timed out waiting for the room (is the daemon connected? run `hermes connect`)"),
+            Err(_) => bail!(
+                "timed out waiting for the room (is the daemon connected? run `hermes connect`)"
+            ),
         }
     }
 }
@@ -337,7 +353,10 @@ async fn status() -> Result<()> {
 
 async fn watch() -> Result<()> {
     let c = client().await?;
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     println!("watching daemon events (Ctrl-C to stop)…");
     while let Some(ev) = events.recv().await {
         println!("{ev:?}");

@@ -222,9 +222,19 @@ mod tests {
                 assert_eq!(room_id, room);
                 assert_eq!(node_id, secret.public().node_id);
                 assert_eq!(timestamp_ms, 1_700_000_000_000);
-                assert!(verify_register(&room_id, &node_id, timestamp_ms, &signature));
+                assert!(verify_register(
+                    &room_id,
+                    &node_id,
+                    timestamp_ms,
+                    &signature
+                ));
                 // Tampered timestamp must fail verification.
-                assert!(!verify_register(&room_id, &node_id, timestamp_ms + 1, &signature));
+                assert!(!verify_register(
+                    &room_id,
+                    &node_id,
+                    timestamp_ms + 1,
+                    &signature
+                ));
             }
             other => panic!("unexpected parse: {other:?}"),
         }
@@ -236,7 +246,10 @@ mod tests {
         let payload = b"ciphertext bytes";
         let data = encode_data(&dest, payload);
         match parse_packet(&data) {
-            Some(RelayPacket::Data { dest: d, payload: p }) => {
+            Some(RelayPacket::Data {
+                dest: d,
+                payload: p,
+            }) => {
                 assert_eq!(d, dest);
                 assert_eq!(p, payload);
             }

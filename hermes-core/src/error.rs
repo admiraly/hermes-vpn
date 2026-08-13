@@ -36,6 +36,10 @@ pub enum HermesError {
     #[error("room error: {0}")]
     Room(String),
 
+    /// Frame routing / mesh error.
+    #[error("mesh error: {0}")]
+    Mesh(String),
+
     /// Peer not found / disconnected.
     #[error("peer not found: {0}")]
     PeerNotFound(String),
