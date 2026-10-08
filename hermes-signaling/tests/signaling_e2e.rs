@@ -31,7 +31,10 @@ impl SignalingProcess {
         };
         // Wait for the listener to come up.
         for _ in 0..50 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
                 return proc;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

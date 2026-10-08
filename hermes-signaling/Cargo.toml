@@ -1,0 +1,23 @@
+[package]
+name = "hermes-signaling"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hermes WebSocket rendezvous server — authenticates peers, brokers rooms and NAT candidates"
+
+[dependencies]
+hermes-core = { path = "../hermes-core" }
+
+tokio.workspace = true
+axum.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+uuid.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

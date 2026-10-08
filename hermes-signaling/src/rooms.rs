@@ -46,7 +46,12 @@ impl RoomRegistry {
     }
 
     /// Create a room and return it.
-    pub fn create(&self, name: String, mode: RoomMode, relay_addr: Option<String>) -> Arc<ServerRoom> {
+    pub fn create(
+        &self,
+        name: String,
+        mode: RoomMode,
+        relay_addr: Option<String>,
+    ) -> Arc<ServerRoom> {
         let invite = InviteCode::generate();
         let id = Uuid::new_v4();
         let room = Arc::new(ServerRoom {

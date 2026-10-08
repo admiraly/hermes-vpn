@@ -9,7 +9,7 @@
 //! stale after the 180-second reject-after-time deadline.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +59,16 @@ impl std::fmt::Display for PeerPath {
     }
 }
 
+/// Source of per-tunnel WireGuard indices. boringtun puts `index << 8`
+/// in the receiver-index field of every packet addressed to us, so unique
+/// indices let the mesh map a datagram from an unknown address (a roaming
+/// peer) back to its tunnel. Must stay below 2^24.
+static NEXT_INDEX: AtomicU32 = AtomicU32::new(1);
+
+fn allocate_index() -> u32 {
+    NEXT_INDEX.fetch_add(1, Ordering::Relaxed) & 0x00FF_FFFF
+}
+
 /// Live traffic counters for a tunnel.
 #[derive(Debug, Default)]
 pub struct TunnelStats {
@@ -83,6 +93,10 @@ pub struct TunnelStats {
 pub struct PeerTunnel {
     /// The peer this tunnel connects to.
     pub peer: NodeId,
+    /// The peer's WireGuard X25519 public key.
+    peer_wg_pub: [u8; 32],
+    /// Our WireGuard index for this tunnel (see [`NEXT_INDEX`]).
+    local_index: u32,
     /// Current path our datagrams take. Updated when ICE finds a better
     /// route (direct mode) — fixed for the room's lifetime in relayed mode.
     path: Mutex<PeerPath>,
@@ -114,18 +128,21 @@ impl PeerTunnel {
         let static_private: x25519_dalek::StaticSecret = our_wg_bytes.into();
         let peer_public: x25519_dalek::PublicKey = peer_wg_pub.into();
 
+        let local_index = allocate_index();
         // Tunn::new() returns `Self` directly in boringtun 0.6+.
         let tunn = boringtun::noise::Tunn::new(
             static_private,
             peer_public,
             None,     // no pre-shared key in v1
             Some(25), // WireGuard keepalive every 25s
-            0,        // peer index — only relevant if we kept multiple
-            None,     // no DoS rate limiter on the client side
+            local_index,
+            None, // default per-tunnel handshake rate limiter
         );
 
         let this = Arc::new(Self {
             peer,
+            peer_wg_pub,
+            local_index,
             path: Mutex::new(path),
             socket,
             tunn: Mutex::new(tunn),
@@ -167,6 +184,19 @@ impl PeerTunnel {
     #[must_use]
     pub fn path(&self) -> PeerPath {
         *self.path.lock()
+    }
+
+    /// The peer's WireGuard public key.
+    #[must_use]
+    pub fn peer_wireguard_public(&self) -> [u8; 32] {
+        self.peer_wg_pub
+    }
+
+    /// Our WireGuard index for this tunnel — the upper 24 bits of the
+    /// receiver index on every packet the peer sends us.
+    #[must_use]
+    pub fn local_index(&self) -> u32 {
+        self.local_index
     }
 
     /// Send an already-encrypted WireGuard datagram along the current
@@ -231,6 +261,30 @@ impl PeerTunnel {
     /// # Errors
     /// Fails on decryption or socket write errors.
     pub async fn on_datagram(&self, datagram: &[u8]) -> Result<Option<BytesMut>> {
+        self.process(datagram, None).await
+    }
+
+    /// Like [`Self::on_datagram`], but any packets boringtun wants to send
+    /// in response go straight to `reply_to` instead of along the current
+    /// path. Used when a peer roams: the mesh feeds the datagram from the
+    /// peer's *new* address through here, and only switches the tunnel's
+    /// path once WireGuard has authenticated it (i.e. this returns `Ok`).
+    ///
+    /// # Errors
+    /// Fails on decryption or socket write errors.
+    pub async fn on_datagram_from(
+        &self,
+        datagram: &[u8],
+        reply_to: SocketAddr,
+    ) -> Result<Option<BytesMut>> {
+        self.process(datagram, Some(reply_to)).await
+    }
+
+    async fn process(
+        &self,
+        datagram: &[u8],
+        reply_to: Option<SocketAddr>,
+    ) -> Result<Option<BytesMut>> {
         self.stats
             .bytes_rx
             .fetch_add(datagram.len() as u64, Ordering::Relaxed);
@@ -255,7 +309,10 @@ impl PeerTunnel {
                     return Err(HermesError::Tunnel(format!("decap: {e:?}")));
                 }
                 TunnResult::WriteToNetwork(packet) => {
-                    let n = self.send_raw(packet).await?;
+                    let n = match reply_to {
+                        Some(addr) => self.socket.send_to(packet, addr).await?,
+                        None => self.send_raw(packet).await?,
+                    };
                     self.stats.bytes_tx.fetch_add(n as u64, Ordering::Relaxed);
                     input = &[];
                     continue;

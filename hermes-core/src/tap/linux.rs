@@ -11,8 +11,6 @@
 //! Requires `CAP_NET_ADMIN` (run as root or give the binary the
 //! capability via `setcap`).
 
-#![cfg(unix)]
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -60,6 +58,13 @@ impl TunTapAdapter {
             .map_err(|e| HermesError::Tap(format!("tokio-tun build: {e}")))?;
         let tun = Arc::new(tun);
 
+        // The kernel gives a fresh TAP device a random MAC, but peers
+        // address frames to our *derived* virtual MAC (and the Windows
+        // shim synthesizes frames with it). Without this the kernel
+        // drops every unicast frame sent to us as "not for this host".
+        // TAP devices allow live MAC changes, so this works while up.
+        set_mac_address(&config.name, &config.mac.to_string())?;
+
         // Configure IPv4. Use `ip` rather than the libc netlink API to
         // keep the implementation short; if you want to avoid the fork,
         // swap this for `rtnetlink`.
@@ -71,17 +76,28 @@ impl TunTapAdapter {
     }
 }
 
-fn set_ipv4_address(iface: &str, ip: std::net::Ipv4Addr, prefix: u8) -> Result<()> {
+fn run_ip(args: &[&str]) -> Result<()> {
     let status = std::process::Command::new("ip")
-        .args(["addr", "add", &format!("{ip}/{prefix}"), "dev", iface])
+        .args(args)
         .status()
         .map_err(|e| HermesError::Tap(format!("spawn ip: {e}")))?;
     if !status.success() {
         return Err(HermesError::Tap(format!(
-            "ip addr add exited with {status}"
+            "`ip {}` exited with {status}",
+            args.join(" ")
         )));
     }
     Ok(())
+}
+
+fn set_mac_address(iface: &str, mac: &str) -> Result<()> {
+    run_ip(&["link", "set", "dev", iface, "address", mac])
+}
+
+fn set_ipv4_address(iface: &str, ip: std::net::Ipv4Addr, prefix: u8) -> Result<()> {
+    // `replace` rather than `add` so re-entering a room (or a leftover
+    // address from a crashed run) is not an error.
+    run_ip(&["addr", "replace", &format!("{ip}/{prefix}"), "dev", iface])
 }
 
 #[async_trait]

@@ -107,6 +107,7 @@ struct SessionCtx {
     pump_handle: Arc<RwLock<Option<PumpHandle>>>,
     generation: Arc<AtomicU64>,
     my_generation: u64,
+    stun_server: String,
 }
 
 impl SessionCtx {
@@ -132,6 +133,7 @@ async fn establish(ctx: &SessionCtx) -> Result<SignalingClient> {
         room_rt: ctx.room_rt.clone(),
         invite: ctx.invite.clone(),
         cached_candidates: ctx.cached_candidates.clone(),
+        stun_server: ctx.stun_server.clone(),
     });
     let handle = engine_pump::spawn(state.clone(), inbox);
 
@@ -326,6 +328,7 @@ impl HermesEngine {
             pump_handle: self.pump_handle.clone(),
             generation: self.generation.clone(),
             my_generation,
+            stun_server: self.config.stun_server.clone(),
         };
 
         let client = establish(&ctx).await?;

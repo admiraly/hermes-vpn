@@ -1,0 +1,21 @@
+[package]
+name = "hermes-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Hermes desktop app (Tauri 2) — drives the daemon over local IPC"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hermes-core = { path = "../../hermes-core" }
+hermes-daemon = { path = "../../hermes-daemon" }
+
+tauri = { version = "2", features = ["tray-icon"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

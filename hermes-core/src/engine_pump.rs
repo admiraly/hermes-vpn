@@ -42,6 +42,13 @@ use crate::signaling::SignalingClient;
 use crate::tap::{AdapterConfig, PlatformAdapter, VirtualAdapter, VIRTUAL_MTU};
 use crate::tunnel::{PeerPath, PeerTunnel};
 
+/// How long to keep probing a peer's candidates. Long enough for the
+/// peer's own probes (started when *our* candidates reach it) to open its
+/// NAT for ours.
+const PROBE_BUDGET: Duration = Duration::from_secs(8);
+/// How long to wait for the STUN server.
+const STUN_BUDGET: Duration = Duration::from_secs(3);
+
 /// Events the pump emits to anyone watching (the UI, primarily).
 #[derive(Clone, Debug)]
 pub enum EngineEvent {
@@ -153,6 +160,8 @@ pub(crate) struct PumpState {
     /// Cached NAT candidates — populated on first use, reused for every
     /// peer. A property of our socket, so it survives reconnects too.
     pub cached_candidates: Arc<tokio::sync::Mutex<Option<Vec<Candidate>>>>,
+    /// STUN server (`host:port`) used to learn our reflexive address.
+    pub stun_server: String,
 }
 
 impl PumpState {
@@ -332,6 +341,8 @@ async fn enter_room(
         let our_node = state.secret.public().node_id;
         let our_ip = VirtualIpv4::from_node_id(&our_node, room.subnet_prefix).0;
         let our_mac = VirtualMac::from_node_id(&our_node);
+        // The shim answers ARP for this address on IP-only adapters.
+        state.router.set_own_ipv4(Some(our_ip));
 
         let adapter_cfg = AdapterConfig {
             name: "Hermes".to_string(),
@@ -497,20 +508,21 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
     }
 
     let socket = state.mesh.socket.clone();
-    let host = socket.local_addr().ok();
+    // The socket is bound to 0.0.0.0; advertise the LAN address instead.
+    let host = socket.local_addr().ok().and_then(nat::host_candidate_addr);
 
-    // STUN — learn our server-reflexive address.
-    let reflexive = match nat::stun::query_reflexive_address(
-        &socket,
-        nat::stun::DEFAULT_STUN_SERVER
-            .parse()
-            .unwrap_or_else(|_| "1.1.1.1:3478".parse().unwrap()),
-    )
-    .await
-    {
-        Ok(addr) => Some(addr),
+    // STUN — learn our server-reflexive address. The request rides the
+    // shared socket and the response comes back through the mesh demux.
+    let reflexive = match resolve_ipv4(&state.stun_server).await {
+        Ok(server) => match state.mesh.stun_binding(server, STUN_BUDGET).await {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                debug!(?e, "STUN failed");
+                None
+            }
+        },
         Err(e) => {
-            debug!(?e, "STUN failed");
+            debug!(?e, server = %state.stun_server, "STUN server unresolvable");
             None
         }
     };
@@ -518,9 +530,7 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
     // UPnP — best-effort port mapping on the local router. Only useful
     // if our host address is an IPv4 address (UPnP only targets v4).
     let upnp = if let Some(std::net::SocketAddr::V4(v4)) = host {
-        let internal_port = v4.port();
-        let internal_ip = *v4.ip();
-        match nat::upnp::map_udp_port(internal_ip, internal_port, "Hermes").await {
+        match nat::upnp::map_udp_port(*v4.ip(), v4.port(), "Hermes").await {
             Ok(mapped) => Some(std::net::SocketAddr::V4(mapped)),
             Err(e) => {
                 debug!(?e, "UPnP mapping failed");
@@ -533,7 +543,12 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
 
     let candidates = nat::ice::gather_candidates(host, upnp, reflexive, None);
     debug!(count = candidates.len(), "gathered NAT candidates");
-    *guard = Some(candidates.clone());
+    // Only cache a complete set: if STUN failed (transient network
+    // trouble), try again for the next peer rather than advertising a
+    // host-only list for the rest of the session.
+    if reflexive.is_some() {
+        *guard = Some(candidates.clone());
+    }
     candidates
 }
 
@@ -586,7 +601,7 @@ async fn probe_and_tunnel(
     };
 
     let socket = state.mesh.socket.clone();
-    let result = nat::ice::probe_candidates(&socket, &candidates, Duration::from_secs(4)).await;
+    let result = nat::ice::probe_candidates(&state.mesh, &candidates, PROBE_BUDGET).await;
 
     match result {
         Ok(path) => {
@@ -656,11 +671,19 @@ async fn probe_and_tunnel(
 
 /// Resolve a relay `host:port` string to an IPv4 socket address.
 async fn resolve_relay(addr_str: &str) -> Result<SocketAddr> {
+    resolve_ipv4(addr_str)
+        .await
+        .map_err(|e| HermesError::Room(format!("relay: {e}")))
+}
+
+/// Resolve `host:port` to its first IPv4 address. The engine socket is
+/// bound to `0.0.0.0`, so only IPv4 destinations are reachable from it.
+async fn resolve_ipv4(addr_str: &str) -> Result<SocketAddr> {
     tokio::net::lookup_host(addr_str)
         .await
-        .map_err(|e| HermesError::Room(format!("resolve relay {addr_str}: {e}")))?
+        .map_err(|e| HermesError::Nat(format!("resolve {addr_str}: {e}")))?
         .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| HermesError::Room(format!("relay {addr_str} has no IPv4 address")))
+        .ok_or_else(|| HermesError::Nat(format!("{addr_str} has no IPv4 address")))
 }
 
 /// Start the relay registration keepalive and its health watcher if they
@@ -738,5 +761,7 @@ pub(crate) async fn tear_down_room(room_rt: &RoomRuntime, mesh: Option<&Arc<Mesh
         for peer in mesh.peers() {
             mesh.remove_peer(peer).await;
         }
+        mesh.router.clear();
+        mesh.router.set_own_ipv4(None);
     }
 }

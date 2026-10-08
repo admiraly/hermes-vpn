@@ -1,0 +1,29 @@
+[package]
+name = "hermes-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Privileged Hermes background service — owns the virtual adapter and serves the engine over local IPC"
+
+[lib]
+name = "hermes_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hermes-daemon"
+path = "src/main.rs"
+
+[dependencies]
+hermes-core = { path = "../hermes-core" }
+
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+directories.workspace = true

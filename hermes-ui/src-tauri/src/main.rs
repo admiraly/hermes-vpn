@@ -78,10 +78,7 @@ async fn get_identity(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn connect(
-    signaling_url: Option<String>,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+async fn connect(signaling_url: Option<String>, state: State<'_, AppState>) -> Result<(), String> {
     let client = state.client().await?;
     let body = client
         .call(CommandPayload::Connect { signaling_url })

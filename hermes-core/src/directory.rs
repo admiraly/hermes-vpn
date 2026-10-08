@@ -224,7 +224,9 @@ impl ServerDirectory {
     /// Fails if no server with that name exists.
     pub fn set_active_signaling(&mut self, name: &str) -> Result<()> {
         if !self.signaling_servers().iter().any(|s| s.name == name) {
-            return Err(HermesError::Room(format!("no signaling server named {name}")));
+            return Err(HermesError::Room(format!(
+                "no signaling server named {name}"
+            )));
         }
         self.persisted.active_signaling = Some(name.to_string());
         Ok(())
@@ -327,8 +329,12 @@ mod tests {
     #[test]
     fn custom_shadows_builtin_by_name() {
         let mut dir = ServerDirectory::default();
-        dir.add_custom(ServerKind::Signaling, "Local".into(), "ws://10.0.0.1:1/v1".into())
-            .unwrap();
+        dir.add_custom(
+            ServerKind::Signaling,
+            "Local".into(),
+            "ws://10.0.0.1:1/v1".into(),
+        )
+        .unwrap();
         let servers = dir.signaling_servers();
         let local: Vec<_> = servers.iter().filter(|s| s.name == "Local").collect();
         assert_eq!(local.len(), 1);
@@ -339,8 +345,12 @@ mod tests {
     #[test]
     fn active_selection_resolves() {
         let mut dir = ServerDirectory::default();
-        dir.add_custom(ServerKind::Signaling, "VPS".into(), "wss://vps.example/v1".into())
-            .unwrap();
+        dir.add_custom(
+            ServerKind::Signaling,
+            "VPS".into(),
+            "wss://vps.example/v1".into(),
+        )
+        .unwrap();
         dir.set_active_signaling("VPS").unwrap();
         assert_eq!(
             dir.resolve_signaling_url().as_deref(),
