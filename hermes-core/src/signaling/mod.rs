@@ -7,5 +7,5 @@
 pub mod client;
 pub mod protocol;
 
-pub use client::SignalingClient;
-pub use protocol::{ClientMessage, PeerInfo, ServerMessage};
+pub use client::{Keepalive, SignalingClient};
+pub use protocol::{ClientMessage, PeerInfo, RoomRestore, ServerMessage};

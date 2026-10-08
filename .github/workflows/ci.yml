@@ -67,10 +67,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --exclude hermes-ui --locked
-      - name: Smoke test (relayed, p2p, fallback)
+      - name: Smoke test (relayed, p2p, fallback, signaling restart)
         run: |
           sudo modprobe tun || true
-          for mode in relayed p2p fallback; do
+          for mode in relayed p2p fallback restart; do
             sudo scripts/netns-smoke.sh "$mode" || exit 1
           done
       - name: Logs on failure

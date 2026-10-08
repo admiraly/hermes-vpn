@@ -45,7 +45,7 @@ use crate::error::{HermesError, Result};
 use crate::mesh::Mesh;
 use crate::nat::Candidate;
 use crate::room::{InviteCode, Room, RoomMode};
-use crate::signaling::{ClientMessage, SignalingClient};
+use crate::signaling::{ClientMessage, RoomRestore, SignalingClient};
 
 /// First reconnect delay; doubles per attempt up to [`RECONNECT_MAX_DELAY`].
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -183,9 +183,24 @@ async fn supervise(ctx: SessionCtx, mut client: SignalingClient) {
 
         // Re-join the room we were in. The pump's enter_room recognizes a
         // re-join of the same room and keeps the adapter and live tunnels.
-        let invite = ctx.invite.read().clone();
+        // The restore info lets a restarted server recreate the room.
+        let invite = *ctx.invite.read();
         if let Some(code) = invite {
-            if let Err(e) = new_client.send(ClientMessage::JoinRoom { code }).await {
+            let restore = ctx
+                .room_rt
+                .current_room
+                .read()
+                .as_ref()
+                .map(|r| RoomRestore {
+                    room_id: r.id,
+                    name: r.name.clone(),
+                    mode: r.mode,
+                    relay_addr: r.relay_addr.clone(),
+                });
+            if let Err(e) = new_client
+                .send(ClientMessage::JoinRoom { code, restore })
+                .await
+            {
                 warn!(?e, "re-join request failed");
             }
         }
@@ -397,7 +412,13 @@ impl HermesEngine {
         let state = self.pump_state()?;
         // Remember the code so an automatic reconnect can re-join.
         *self.invite.write() = Some(code);
-        state.signaling.send(ClientMessage::JoinRoom { code }).await
+        state
+            .signaling
+            .send(ClientMessage::JoinRoom {
+                code,
+                restore: None,
+            })
+            .await
     }
 
     /// Leave the current room, tearing down the TAP adapter and tunnels.

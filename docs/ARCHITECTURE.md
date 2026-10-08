@@ -128,6 +128,27 @@ engine.
 - `hermes-relay`, `hermes-signaling` — thin binaries over `hermes-core`'s
   wire types; all room/auth/relay logic lives in small, testable files.
 
+## Signaling liveness and reconnects
+
+Signaling is control plane only; tunnels never depend on it once up. The
+engine's supervisor reconnects with backoff whenever the WebSocket dies,
+and three mechanisms make that safe:
+
+- **Keepalive.** Clients send `ping` every 15 s. Both sides treat 45 s of
+  silence as a dead connection, so a half-open TCP session (NAT timeout,
+  network switch) is noticed instead of hanging forever.
+- **One session per node.** Room membership is tracked per session, and
+  a join replaces any older session of the same node. When the stale
+  connection finally closes, the server sees it is no longer a member and
+  stays quiet — peers are only told `peer_left` about sessions that were
+  still current.
+- **Room restore.** The automatic re-join carries `restore` (room id,
+  name, mode, relay). If the server restarted and no longer knows the
+  invite code, it recreates the room under the same id and code, so every
+  member lands back in the same room and `enter_room` keeps the adapter
+  and tunnels. Knowing the code already grants membership, so this adds
+  no new power; a restore can't reuse the id of a different live room.
+
 ## Protocol versions
 
 - Signaling protocol: **v2** (room modes + relay assignment).

@@ -18,7 +18,7 @@ whole again:
       `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
       the UI build files (package.json, Vite/TS config, Tauri
       capabilities, placeholder icons)
-- [x] 55 tests pass on Linux, warning-free under `-D warnings`; the
+- [x] 63 tests pass on Linux, warning-free under `-D warnings`; the
       Tauri app builds on Linux
 - [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
       daemons with kernel TAP adapters in separate network namespaces.
@@ -162,6 +162,20 @@ Improvements added:
       signaling binary (kill → restart → reconnected; silent after
       explicit disconnect). New events: `SignalingReconnecting{attempt}`,
       `SignalingReconnected`.
+- [x] **Reconnect correctness** (found by code review, fixed with tests
+      against the real server in `session_lifecycle_e2e.rs`):
+      - a stale session of a reconnecting node used to be removed *by node
+        id* when it finally died — kicking the live session too and
+        telling every peer the node left. Membership is now per session;
+        stale entries are replaced on join and leave silently.
+      - half-open connections went unnoticed (client side: forever).
+        Clients ping every 15 s; both sides drop 45 s of silence.
+      - a signaling restart wiped all rooms, so auto re-join failed with
+        `invalid_code` forever. Re-joins carry restore info and the server
+        recreates the room under the same id and code.
+      - joining a second room didn't leave the first.
+      The netns smoke test's `restart` mode proves a live P2P room
+      survives a signaling restart with its tunnel intact.
 - [x] **Automatic P2P → relay fallback.** A P2P room can now carry an
       optional fallback relay (set at creation; checkbox in the UI). When a
       peer's direct path can't be established, the engine registers with

@@ -101,7 +101,7 @@ public server fleet and the directory manifest.
 ## Project status
 
 The tree was reconstructed after a data loss (see the git history) and is
-whole again: every crate builds warning-free, **55 automated tests pass**
+whole again: every crate builds warning-free, **63 automated tests pass**
 (unit tests plus end-to-end suites that drive the real relay and signaling
 binaries — including a full WireGuard handshake through the relay, ICE
 hole punching between two meshes, endpoint roaming, and auto-reconnect),
@@ -110,7 +110,7 @@ and the Tauri desktop app builds.
 Beyond loopback tests, [`scripts/netns-smoke.sh`](scripts/netns-smoke.sh)
 runs two daemons with **real TAP adapters** in separate Linux network
 namespaces and pings across the virtual LAN. Relayed, direct P2P, and
-P2P-with-relay-fallback rooms all pass, including full-MTU packets.
+P2P-with-relay-fallback rooms all pass, including full-MTU packets, and a live room survives a signaling-server restart.
 The remaining gap is the same as before: a test across real NATs with a
 Windows peer ([TEST-RUN.md](TEST-RUN.md)).
 

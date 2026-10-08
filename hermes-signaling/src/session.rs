@@ -1,6 +1,7 @@
 //! Per-connection WebSocket session state machine.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
@@ -11,12 +12,18 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::{SinkExt, StreamExt};
 use rand::RngCore;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use hermes_core::signaling::protocol::{ClientMessage, PeerInfo, ServerMessage};
 
-use crate::rooms::{RoomRegistry, Session};
+use hermes_core::room::RoomMode;
+
+use crate::rooms::{RoomRegistry, ServerRoom, Session};
+
+/// Default silence after which a client is considered gone: three missed
+/// client pings (every 15 s).
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Axum handler: upgrade to WebSocket and run the session loop.
 pub async fn ws_handler(ws: WebSocketUpgrade, State(registry): State<RoomRegistry>) -> Response {
@@ -136,10 +143,22 @@ async fn run_session(socket: WebSocket, registry: RoomRegistry) {
         }
     });
 
-    let mut current_room: Option<Arc<crate::rooms::ServerRoom>> = None;
+    let mut current_room: Option<Arc<ServerRoom>> = None;
+    let idle_timeout = idle_timeout();
 
-    // Main request loop.
-    while let Some(frame) = ws_rx.next().await {
+    // Main request loop. Clients ping every 15 s; a connection silent for
+    // longer than `idle_timeout` is dead (half-open TCP after a NAT
+    // timeout or network switch) and is dropped so the room learns the
+    // member is gone instead of waiting for TCP to time out.
+    loop {
+        let frame = match tokio::time::timeout(idle_timeout, ws_rx.next()).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(_) => {
+                info!(node = %node_id.short(), "client silent — dropping session");
+                break;
+            }
+        };
         let msg = match frame {
             Ok(Message::Text(t)) => match serde_json::from_str::<ClientMessage>(&t) {
                 Ok(m) => m,
@@ -165,93 +184,115 @@ async fn run_session(socket: WebSocket, registry: RoomRegistry) {
                 // A relayed room is meaningless without a relay address —
                 // reject early instead of letting every member fail to
                 // resolve `None` later.
-                if mode == hermes_core::room::RoomMode::Relayed
+                if mode == RoomMode::Relayed
                     && relay_addr.as_deref().map_or(true, |a| a.trim().is_empty())
                 {
-                    let _ = session
-                        .outgoing
-                        .send(ServerMessage::Error {
-                            code: "relay_required".into(),
-                            message: "relayed rooms need a relay address".into(),
-                        })
-                        .await;
+                    send(
+                        &session,
+                        error("relay_required", "relayed rooms need a relay address"),
+                    )
+                    .await;
                     continue;
+                }
+                // Creating a room implicitly leaves the current one.
+                if let Some(old) = current_room.take() {
+                    leave(&registry, &old, &session).await;
                 }
                 let room = registry.create(name, mode, relay_addr);
                 info!(room = %room.id, name = %room.name, mode = ?room.mode, "room created");
-                room.members.write().push(session.clone());
+                room.insert_member(session.clone());
                 current_room = Some(room.clone());
-                let _ = session
-                    .outgoing
-                    .send(ServerMessage::RoomCreated {
+                send(
+                    &session,
+                    ServerMessage::RoomCreated {
                         room_id: room.id,
                         invite_code: room.invite,
                         mode: room.mode,
                         relay_addr: room.relay_addr.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
             }
-            ClientMessage::JoinRoom { code } => match registry.find_by_invite(&code) {
-                Some(room) => {
-                    // Notify existing members of the new peer.
-                    let peer_info = PeerInfo {
-                        node_id: session.node_id,
-                        wireguard_public: session.wireguard_public,
-                        alias: session.alias.clone(),
-                    };
-                    let (snapshot, members_clone): (Vec<PeerInfo>, Vec<Arc<Session>>) = {
-                        let members = room.members.read();
-                        let snap = members
+            ClientMessage::JoinRoom { code, restore } => {
+                let restoring = restore.is_some();
+                let Some(room) = registry.find_or_restore(&code, restore) else {
+                    send(
+                        &session,
+                        error("invalid_code", "invite code not recognised"),
+                    )
+                    .await;
+                    continue;
+                };
+                // Joining another room implicitly leaves the current one;
+                // re-joining the same room is just a refresh.
+                if let Some(old) = current_room.take() {
+                    if old.id != room.id {
+                        leave(&registry, &old, &session).await;
+                    }
+                }
+                if restoring && room.members.read().is_empty() {
+                    info!(room = %room.id, "room restored after server restart");
+                }
+
+                let peer_info = PeerInfo {
+                    node_id: session.node_id,
+                    wireguard_public: session.wireguard_public,
+                    alias: session.alias.clone(),
+                };
+                // Everyone else currently in the room (minus any stale
+                // session of this same node, which is about to be replaced).
+                let others: Vec<Arc<Session>> = room
+                    .members
+                    .read()
+                    .iter()
+                    .filter(|m| m.node_id != session.node_id)
+                    .cloned()
+                    .collect();
+                for m in &others {
+                    let _ = m
+                        .outgoing
+                        .send(ServerMessage::PeerJoined {
+                            peer: peer_info.clone(),
+                        })
+                        .await;
+                }
+                if let Some(stale) = room.insert_member(session.clone()) {
+                    if !Arc::ptr_eq(&stale, &session) {
+                        info!(
+                            node = %session.node_id.short(),
+                            stale = %stale.session_id,
+                            "replaced stale session of a reconnecting node"
+                        );
+                    }
+                }
+                current_room = Some(room.clone());
+                send(
+                    &session,
+                    ServerMessage::RoomJoined {
+                        room_id: room.id,
+                        members: others
                             .iter()
-                            .filter(|m| m.node_id != session.node_id)
                             .map(|m| PeerInfo {
                                 node_id: m.node_id,
                                 wireguard_public: m.wireguard_public,
                                 alias: m.alias.clone(),
                             })
-                            .collect();
-                        let cloned = members.clone();
-                        (snap, cloned)
-                    };
-                    // Broadcast PeerJoined to existing members.
-                    for m in &members_clone {
-                        let _ = m
-                            .outgoing
-                            .send(ServerMessage::PeerJoined {
-                                peer: peer_info.clone(),
-                            })
-                            .await;
-                    }
-                    room.members.write().push(session.clone());
-                    current_room = Some(room.clone());
-                    let _ = session
-                        .outgoing
-                        .send(ServerMessage::RoomJoined {
-                            room_id: room.id,
-                            members: snapshot,
-                            mode: room.mode,
-                            relay_addr: room.relay_addr.clone(),
-                        })
-                        .await;
-                }
-                None => {
-                    let _ = session
-                        .outgoing
-                        .send(ServerMessage::Error {
-                            code: "invalid_code".into(),
-                            message: "invite code not recognised".into(),
-                        })
-                        .await;
-                }
-            },
+                            .collect(),
+                        mode: room.mode,
+                        relay_addr: room.relay_addr.clone(),
+                    },
+                )
+                .await;
+            }
             ClientMessage::LeaveRoom => {
                 if let Some(room) = current_room.take() {
-                    notify_left(&room, session.node_id).await;
-                    prune_room(&registry, &room, session.node_id);
+                    leave(&registry, &room, &session).await;
                 }
             }
             ClientMessage::RelayCandidates { to, candidates } => {
-                let Some(room) = current_room.as_ref() else {
+                // A session that was replaced by a newer one of the same
+                // node no longer speaks for that node.
+                let Some(room) = current_room.as_ref().filter(|r| r.has_member(&session)) else {
                     continue;
                 };
                 // Resolve and clone the target session in a scope that
@@ -270,43 +311,56 @@ async fn run_session(socket: WebSocket, registry: RoomRegistry) {
                         .await;
                 }
             }
-            ClientMessage::Ping => {
-                let _ = session.outgoing.send(ServerMessage::Pong).await;
-            }
+            ClientMessage::Ping => send(&session, ServerMessage::Pong).await,
         }
     }
 
     // Cleanup on disconnect.
     if let Some(room) = current_room.take() {
-        notify_left(&room, session.node_id).await;
-        prune_room(&registry, &room, session.node_id);
+        leave(&registry, &room, &session).await;
     }
     drop(session);
     let _ = writer.await;
 }
 
-async fn notify_left(room: &crate::rooms::ServerRoom, departing: hermes_core::crypto::NodeId) {
-    let members = room.members.read().clone();
-    for m in members {
-        if m.node_id != departing {
-            let _ = m
-                .outgoing
-                .send(ServerMessage::PeerLeft { node_id: departing })
-                .await;
-        }
+/// Silence after which a client is considered gone. Overridable via
+/// `HERMES_SIGNALING_IDLE_TIMEOUT_SECS` (tests use a short one).
+fn idle_timeout() -> Duration {
+    std::env::var("HERMES_SIGNALING_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(DEFAULT_IDLE_TIMEOUT, Duration::from_secs)
+}
+
+async fn send(session: &Session, msg: ServerMessage) {
+    let _ = session.outgoing.send(msg).await;
+}
+
+fn error(code: &str, message: &str) -> ServerMessage {
+    ServerMessage::Error {
+        code: code.into(),
+        message: message.into(),
     }
 }
 
-fn prune_room(
-    registry: &RoomRegistry,
-    room: &Arc<crate::rooms::ServerRoom>,
-    departing: hermes_core::crypto::NodeId,
-) {
-    let mut members = room.members.write();
-    members.retain(|m| m.node_id != departing);
-    if members.is_empty() {
-        let id = room.id;
-        drop(members);
-        registry.remove(id);
+/// Take `session` out of `room`. Only if it was still a member — not
+/// already superseded by a newer session of the same node — do the other
+/// members hear `PeerLeft`; otherwise the node is still present and
+/// telling peers it left would tear down working tunnels.
+async fn leave(registry: &RoomRegistry, room: &Arc<ServerRoom>, session: &Arc<Session>) {
+    if room.remove_member(session) {
+        let departing = session.node_id;
+        let members = room.members.read().clone();
+        for m in members {
+            if m.node_id != departing {
+                let _ = m
+                    .outgoing
+                    .send(ServerMessage::PeerLeft { node_id: departing })
+                    .await;
+            }
+        }
+    } else {
+        debug!(node = %session.node_id.short(), "superseded session left — no PeerLeft");
     }
+    registry.remove_if_empty(room);
 }

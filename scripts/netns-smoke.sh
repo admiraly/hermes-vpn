@@ -9,6 +9,7 @@
 #   scripts/netns-smoke.sh relayed     # all traffic via the relay
 #   scripts/netns-smoke.sh p2p         # direct path
 #   scripts/netns-smoke.sh fallback    # direct path firewalled → relay fallback
+#   scripts/netns-smoke.sh restart     # p2p room survives a signaling restart
 #   scripts/netns-smoke.sh clean       # tear everything down
 #
 # Needs: iproute2, iputils-ping, iptables (fallback mode).
@@ -62,7 +63,10 @@ fi
 # --- servers + daemons ------------------------------------------------------
 rm -rf "$WORK"; mkdir -p "$WORK/a" "$WORK/b" /run/hermes-smoke-a /run/hermes-smoke-b
 export RUST_LOG=${RUST_LOG:-info}
-HERMES_SIGNALING_BIND=0.0.0.0:8787 "$BIN/hermes-signaling" >"$WORK/signaling.log" 2>&1 &
+start_signaling() {
+  HERMES_SIGNALING_BIND=0.0.0.0:8787 "$BIN/hermes-signaling" >>"$WORK/signaling.log" 2>&1 &
+}
+start_signaling
 # Wildcard bind on purpose: the root namespace is multi-homed (one address
 # per veth), and B reaches the relay via A's side address — the relay must
 # still answer B from the address B sent to.
@@ -79,7 +83,7 @@ for n in a b; do run $n "$BIN/hermes" use-signaling main >/dev/null; run $n "$BI
 
 case $MODE in
   relayed) ARGS=(--mode relayed --relay $RELAY); WANT=relayed ;;
-  p2p) ARGS=(--mode p2p); WANT=direct ;;
+  p2p | restart) ARGS=(--mode p2p); WANT=direct ;;
   fallback) ARGS=(--mode p2p --relay $RELAY); WANT=relayed ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac
@@ -100,6 +104,27 @@ FAIL=0
 ip netns exec hermes-a ping -c 3 -W 2 "$PEER_IP" >/dev/null || FAIL=1
 ip netns exec hermes-a ping -c 2 -W 2 -s 1300 -M do "$PEER_IP" >/dev/null || FAIL=1
 run a "$BIN/hermes" status | grep -q " $WANT " || FAIL=1
+if [ "$MODE" = restart ] && [ $FAIL = 0 ]; then
+  # Kill signaling: rooms vanish from its memory. Both daemons must
+  # reconnect, restore the same room, and keep their live tunnel.
+  ROOM_BEFORE=$(run b "$BIN/hermes" status | grep '^room')
+  pkill -f "^$BIN/hermes-signaling"
+  sleep 2
+  start_signaling
+  for _ in $(seq 1 40); do
+    run a "$BIN/hermes" status | grep -q '^connected  true' &&
+      run b "$BIN/hermes" status | grep -q '^connected  true' && break
+    sleep 1
+  done
+  sleep 2 # let the re-joins land
+  run b "$BIN/hermes" status
+  run a "$BIN/hermes" status | grep -q '^connected  true' || { echo "A did not reconnect"; FAIL=1; }
+  run b "$BIN/hermes" status | grep -q '^connected  true' || { echo "B did not reconnect"; FAIL=1; }
+  [ "$(run b "$BIN/hermes" status | grep '^room')" = "$ROOM_BEFORE" ] || { echo "B is in a different room"; FAIL=1; }
+  run a "$BIN/hermes" status | grep -q " $WANT " || { echo "A lost its peer"; FAIL=1; }
+  ip netns exec hermes-a ping -c 3 -W 2 "$PEER_IP" >/dev/null || { echo "no traffic after restart"; FAIL=1; }
+  grep -q "room restored" "$WORK/signaling.log" || echo "(note: restore not logged)"
+fi
 if [ $FAIL = 0 ]; then
   echo "PASS ($MODE): A reached B at $PEER_IP over a $WANT path, incl. 1300-byte DF packets"
 else

@@ -47,6 +47,15 @@ pub enum ClientMessage {
     JoinRoom {
         /// Invite code.
         code: InviteCode,
+        /// Sent only by an automatic re-join after a reconnect: the room as
+        /// this member knew it. If the server no longer knows the code
+        /// (it restarted and lost its in-memory rooms), it recreates the
+        /// room from this under the same id and code, so every member
+        /// lands back in the *same* room and live tunnels survive.
+        /// Knowing the invite code is already what grants membership, so
+        /// this lets a member do nothing it couldn't do before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore: Option<RoomRestore>,
     },
     /// Leave the current room (if any).
     LeaveRoom,
@@ -59,6 +68,20 @@ pub enum ClientMessage {
     },
     /// Keepalive ping.
     Ping,
+}
+
+/// What a member remembers about its room, for [`ClientMessage::JoinRoom`]'s
+/// `restore` field.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoomRestore {
+    /// The room's id.
+    pub room_id: RoomId,
+    /// Display name.
+    pub name: String,
+    /// Traffic mode.
+    pub mode: RoomMode,
+    /// Relay address (primary for relayed rooms, fallback for p2p rooms).
+    pub relay_addr: Option<String>,
 }
 
 /// Messages sent from server → client.

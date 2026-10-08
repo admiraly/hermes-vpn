@@ -336,6 +336,11 @@ async fn enter_room(
         }
     }
 
+    // Keep the name the user already sees when re-joining the same room.
+    let name = match state.current_room() {
+        Some(r) if rejoining => r.name.clone(),
+        _ => name,
+    };
     let room = Arc::new(Room::new(room_id, name, mode, relay_addr));
 
     if !rejoining {

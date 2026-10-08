@@ -98,7 +98,10 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
 
     // Bob joins by invite code and must learn the same mode + relay.
     bob_client
-        .send(ClientMessage::JoinRoom { code: invite })
+        .send(ClientMessage::JoinRoom {
+            code: invite,
+            restore: None,
+        })
         .await
         .unwrap();
 
@@ -248,7 +251,10 @@ async fn p2p_room_fallback_relay_propagates_to_joiner() {
     };
 
     frank_client
-        .send(ClientMessage::JoinRoom { code: invite })
+        .send(ClientMessage::JoinRoom {
+            code: invite,
+            restore: None,
+        })
         .await
         .unwrap();
 
