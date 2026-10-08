@@ -145,4 +145,23 @@ jobs:
           name: Hermes ${{ env.TAG }}
           prerelease: ${{ contains(env.TAG, '-') }}
           generate_release_notes: true
+          body: |
+            Hermes is a self-hostable virtual LAN with first-class broadcast and
+            multicast support. Free for noncommercial use under the
+            [PolyForm Noncommercial License 1.0.0](https://github.com/admiraly/hermes-vpn/blob/master/LICENSE.md);
+            commercial use needs a separate license.
+
+            **Getting started:** run the servers (`hermes-signaling`, `hermes-relay`)
+            somewhere reachable, install the daemon as a service
+            ([Linux](https://github.com/admiraly/hermes-vpn/blob/master/docs/DEPLOYMENT.md#5a-linux-client):
+            `sudo ./install.sh` from the tarball;
+            [Windows](https://github.com/admiraly/hermes-vpn/blob/master/docs/DEPLOYMENT.md#5b-windows-client):
+            `hermes-daemon.exe service install`), then use the desktop app or
+            the `hermes` CLI. Verify downloads against `SHA256SUMS`.
+
+            **Status:** verified in CI on real network adapters (Linux TAP and
+            Windows wintun) in relayed, peer-to-peer and fallback rooms. Not yet
+            verified across real NATs between separate machines; reports are very
+            welcome ([TEST-RUN.md](https://github.com/admiraly/hermes-vpn/blob/master/TEST-RUN.md)).
+            Open work: [CHECKLIST.md](https://github.com/admiraly/hermes-vpn/blob/master/CHECKLIST.md).
           files: dist/*
