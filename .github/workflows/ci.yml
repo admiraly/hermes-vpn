@@ -78,6 +78,37 @@ jobs:
         if: failure()
         run: sudo sh -c 'for f in /tmp/hermes-smoke/*.log; do echo "== $f"; cat "$f"; done'
 
+  # The Windows data path for real: GitHub's Windows runners are elevated,
+  # so the daemon can create a wintun adapter. The headless echo peer
+  # joins the room via the relay and Windows pings it — first with the
+  # daemon run by hand, then installed as a Windows service.
+  windows-smoke:
+    name: smoke (windows, real wintun)
+    runs-on: windows-latest
+    env:
+      WINTUN_VERSION: "0.14.1"
+      WINTUN_SHA256: "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          cargo build --locked -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
+          cargo build --locked -p hermes-core --example echo_peer
+      - name: Fetch and verify wintun.dll
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile wintun.zip
+          $hash = (Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:WINTUN_SHA256) { throw "wintun.zip checksum mismatch: $hash" }
+          Expand-Archive wintun.zip -DestinationPath wintun
+          Copy-Item wintun/wintun/bin/amd64/wintun.dll target/debug/
+      - name: Smoke test (foreground daemon, then Windows service)
+        shell: pwsh
+        run: ./scripts/windows-smoke.ps1
+
   # Frontend type-check + bundle. Catches TypeScript and Vite errors and
   # produces the dist/ the Tauri crate embeds.
   frontend:
