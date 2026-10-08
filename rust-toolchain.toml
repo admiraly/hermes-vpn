@@ -1,0 +1,5 @@
+# Pin the toolchain so CI's `-D warnings` gate doesn't break when a new
+# stable release adds lints. Bump deliberately.
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

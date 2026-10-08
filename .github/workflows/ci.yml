@@ -53,6 +53,30 @@ jobs:
           RUSTFLAGS: ""
         run: cargo clippy --workspace --exclude hermes-ui --all-targets
 
+  # Real adapters, real daemons: two network namespaces stand in for two
+  # machines and must ping each other across the virtual LAN in every
+  # room mode. Catches what loopback tests can't (TAP setup, ARP, MTU,
+  # daemon/CLI lifecycle).
+  smoke:
+    name: smoke (linux netns, real TAP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --exclude hermes-ui --locked
+      - name: Smoke test (relayed, p2p, fallback)
+        run: |
+          sudo modprobe tun || true
+          for mode in relayed p2p fallback; do
+            sudo scripts/netns-smoke.sh "$mode" || exit 1
+          done
+      - name: Logs on failure
+        if: failure()
+        run: sudo sh -c 'for f in /tmp/hermes-smoke/*.log; do echo "== $f"; cat "$f"; done'
+
   # Frontend type-check + bundle. Catches TypeScript and Vite errors and
   # produces the dist/ the Tauri crate embeds.
   frontend:

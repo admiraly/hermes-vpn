@@ -8,16 +8,28 @@ A concrete, copy-paste runbook for the exact setup you asked for:
 
 driven entirely by the `hermes` command-line tool (no GUI needed).
 
-> **The binaries are already built** for you under `dist/` in this repo:
+> **Build the binaries first** (see [BUILDING.md](BUILDING.md)) and stage
+> them like this — the rest of this guide refers to these folders:
+>
+> ```sh
+> # On Linux:
+> cargo build --release -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
+> mkdir -p dist/linux && cp target/release/hermes{-signaling,-relay,-daemon,} dist/linux/
+> ```
+> ```powershell
+> # On Windows (wintun.dll from https://www.wintun.net, amd64 build):
+> cargo build --release -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
+> mkdir dist\windows; copy target\release\hermes*.exe dist\windows\; copy wintun.dll dist\windows\
+> ```
 >
 > ```
 > dist/linux/    hermes-relay  hermes-signaling  hermes-daemon  hermes
 > dist/windows/  hermes-relay.exe  hermes-signaling.exe  hermes-daemon.exe  hermes.exe  wintun.dll
 > ```
 >
-> The Linux binaries are native x86-64 ELF (built in a Linux container);
-> the Windows binaries are native x86-64. Copy the folders to the matching
-> machines.
+> Before involving real machines you can rehearse the whole flow on one
+> Linux box: `sudo scripts/netns-smoke.sh relayed|p2p|fallback` runs two
+> daemons with real TAP adapters in separate network namespaces.
 
 Throughout, replace **`SERVER_IP`** with your Linux server's address
 (reachable from both clients).
@@ -38,7 +50,7 @@ sudo ufw allow 8788/udp     # relay
 # Run both. For a quick test, two terminals (or tmux); for a lasting
 # setup use the systemd units in docs/SERVER-OPERATIONS.md.
 RUST_LOG=info ./hermes-signaling      # terminal 1 → listens on 0.0.0.0:8787
-RUST_LOG=info ./hermes-relay          # terminal 2 → listens on 0.0.0.0:8788
+HERMES_RELAY_BIND=SERVER_IP:8788 RUST_LOG=info ./hermes-relay   # terminal 2
 ```
 
 Sanity check from your laptop:

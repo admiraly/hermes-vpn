@@ -46,6 +46,15 @@ HERMES_RELAY_BIND=0.0.0.0:8788 RUST_LOG=info ./hermes-relay
 - Sizing: the relay copies packets between sockets; a small VPS handles
   hundreds of Mbit/s. Each room member costs one map entry (~100 bytes).
 
+> **Bind the relay to its public address on multi-homed hosts.** With a
+> wildcard bind (`0.0.0.0`) the kernel answers each client from whichever
+> local address routes back to it — on a server with several IPs that can
+> differ from the address the client sent to, and clients (and their NATs)
+> discard relay replies from an unexpected address. If the host has one
+> public IPv4, `0.0.0.0:8788` is fine; otherwise set
+> `HERMES_RELAY_BIND=<public-ip>:8788`. (Behind cloud 1:1 NAT, bind the
+> private address the provider maps the public IP to.)
+
 ## systemd units
 
 `/etc/systemd/system/hermes-signaling.service`:

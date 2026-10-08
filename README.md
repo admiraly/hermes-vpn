@@ -100,11 +100,23 @@ public server fleet and the directory manifest.
 
 ## Project status
 
-v2 baseline is built and tested (46 passing tests). CI
-([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests the
-engine and servers on Windows **and** Linux, type-checks the frontend, and
-builds the full Tauri app — so the cross-platform code is exercised on every
-push. Known bugs, remaining work, and the future roadmap are tracked in
+The tree was reconstructed after a data loss (see the git history) and is
+whole again: every crate builds warning-free, **55 automated tests pass**
+(unit tests plus end-to-end suites that drive the real relay and signaling
+binaries — including a full WireGuard handshake through the relay, ICE
+hole punching between two meshes, endpoint roaming, and auto-reconnect),
+and the Tauri desktop app builds.
+
+Beyond loopback tests, [`scripts/netns-smoke.sh`](scripts/netns-smoke.sh)
+runs two daemons with **real TAP adapters** in separate Linux network
+namespaces and pings across the virtual LAN. Relayed, direct P2P, and
+P2P-with-relay-fallback rooms all pass, including full-MTU packets.
+The remaining gap is the same as before: a test across real NATs with a
+Windows peer ([TEST-RUN.md](TEST-RUN.md)).
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests
+on Windows and Linux, type-checks the frontend, builds the Tauri app, and
+runs the namespace smoke test. Open work and the roadmap live in
 [CHECKLIST.md](CHECKLIST.md).
 
 ## Security model
