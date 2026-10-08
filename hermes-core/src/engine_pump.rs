@@ -37,7 +37,7 @@ use crate::mesh::{self, Mesh};
 use crate::nat::{self, Candidate, PathKind};
 use crate::relay::{self, RegistrationConfig};
 use crate::room::{InviteCode, PeerRecord, PeerStatus, Room, RoomId, RoomMode};
-use crate::signaling::protocol::{ClientMessage, PeerInfo, ServerMessage};
+use crate::signaling::protocol::{ClientMessage, PeerInfo, RoomRestore, ServerMessage};
 use crate::signaling::SignalingClient;
 use crate::tap::{AdapterConfig, PlatformAdapter, VirtualAdapter, VIRTUAL_MTU};
 use crate::tunnel::{PeerPath, PeerTunnel};
@@ -164,7 +164,56 @@ pub(crate) struct PumpState {
     pub cached_candidates: Arc<tokio::sync::Mutex<Option<Vec<Candidate>>>>,
     /// STUN server (`host:port`) used to learn our reflexive address.
     pub stun_server: String,
+    /// Our UPnP port mapping, if we made one (engine-lifetime, renewed in
+    /// the background, removed on shutdown).
+    pub upnp: Arc<UpnpSlot>,
 }
+
+/// A UPnP mapping plus the task that keeps its lease alive.
+pub(crate) struct UpnpLease {
+    pub mapping: nat::upnp::UpnpMapping,
+    renewer: Option<JoinHandle<()>>,
+}
+
+impl UpnpLease {
+    fn new(mapping: nat::upnp::UpnpMapping) -> Self {
+        let renewer = mapping.renew_interval().map(|every| {
+            let m = mapping.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    if let Err(e) = m.renew().await {
+                        warn!(?e, "UPnP renewal failed — will retry");
+                    }
+                }
+            })
+        });
+        Self { mapping, renewer }
+    }
+
+    /// Stop renewing and delete the mapping from the router.
+    pub async fn release(mut self) {
+        if let Some(task) = self.renewer.take() {
+            task.abort();
+        }
+        match tokio::time::timeout(UPNP_BUDGET, self.mapping.remove()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!(?e, "UPnP removal failed"),
+            Err(_) => debug!("UPnP removal timed out"),
+        }
+    }
+}
+
+impl Drop for UpnpLease {
+    fn drop(&mut self) {
+        if let Some(task) = self.renewer.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Where the engine keeps its (at most one) UPnP lease.
+pub(crate) type UpnpSlot = parking_lot::Mutex<Option<UpnpLease>>;
 
 impl PumpState {
     fn current_room(&self) -> Option<Arc<Room>> {
@@ -269,6 +318,31 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
         }
         ServerMessage::Error { code, message } => {
             warn!(%code, %message, "signaling server error");
+            // A join we want (possibly the automatic re-join after a
+            // reconnect, when many clients behind one address re-join at
+            // once) was rate-limited: try again shortly instead of
+            // silently staying out of the room.
+            let pending_code = *state.invite.read();
+            if code == "rate_limited" {
+                if let Some(invite) = pending_code {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        let jitter = rand::random::<u64>() % 5_000;
+                        tokio::time::sleep(Duration::from_millis(5_000 + jitter)).await;
+                        // Still wanted, and still not in the room?
+                        if *state.invite.read() == Some(invite) && !state.signaling.is_closed() {
+                            let restore = restore_info(&state.room_rt);
+                            let _ = state
+                                .signaling
+                                .send(ClientMessage::JoinRoom {
+                                    code: invite,
+                                    restore,
+                                })
+                                .await;
+                        }
+                    });
+                }
+            }
             let _ = state
                 .events
                 .send(EngineEvent::SignalingError { code, message })
@@ -541,14 +615,27 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
             }
         }
     };
-    // UPnP only targets IPv4.
+    // UPnP only targets IPv4. Reuse an existing mapping (gathering can
+    // re-run if STUN failed earlier) rather than mapping again.
+    let existing = state
+        .upnp
+        .lock()
+        .as_ref()
+        .map(|l| std::net::SocketAddr::V4(l.mapping.external));
     let upnp = async {
+        if existing.is_some() {
+            return existing;
+        }
         let Some(std::net::SocketAddr::V4(v4)) = host else {
             return None;
         };
         let mapping = nat::upnp::map_udp_port(*v4.ip(), v4.port(), "Hermes");
         match tokio::time::timeout(UPNP_BUDGET, mapping).await {
-            Ok(Ok(mapped)) => Some(std::net::SocketAddr::V4(mapped)),
+            Ok(Ok(mapping)) => {
+                let external = std::net::SocketAddr::V4(mapping.external);
+                *state.upnp.lock() = Some(UpnpLease::new(mapping));
+                Some(external)
+            }
             Ok(Err(e)) => {
                 debug!(?e, "UPnP mapping failed");
                 None
@@ -761,6 +848,17 @@ fn ensure_relay_registration(state: &Arc<PumpState>, room_id: RoomId, relay: Soc
         registration,
         health_watcher,
     });
+}
+
+/// What we remember about the current room, for a re-join that may need
+/// to restore it on a restarted server.
+pub(crate) fn restore_info(room_rt: &RoomRuntime) -> Option<RoomRestore> {
+    room_rt.current_room.read().as_ref().map(|r| RoomRestore {
+        room_id: r.id,
+        name: r.name.clone(),
+        mode: r.mode,
+        relay_addr: r.relay_addr.clone(),
+    })
 }
 
 /// Helper used by the engine when leaving a room: stops the driver and

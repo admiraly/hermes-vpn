@@ -18,6 +18,10 @@
 //! | Ethernet frame ...        |
 //! ```
 //!
+//! The same header with identification `"HC"` marks a **control** message
+//! instead of an Ethernet frame — tunnel-internal signalling such as the
+//! latency ping/pong, never handed to the adapter.
+//!
 //! The header never leaves the tunnel — it exists only inside the
 //! encrypted payload — so it needs no checksum and no real addresses.
 //! [`decode_frame`] checks the marker, protocol, and length, which rejects
@@ -27,8 +31,19 @@ use crate::tap::FRAMING_HEADER;
 
 /// IP protocol number used in the synthetic header (RFC 3692 experimental).
 const PROTOCOL_HERMES: u8 = 253;
-/// Identification-field marker: ASCII "HR".
+/// Identification-field marker for Ethernet frames: ASCII "HR".
 const MARKER: [u8; 2] = *b"HR";
+/// Identification-field marker for control messages: ASCII "HC".
+const CONTROL_MARKER: [u8; 2] = *b"HC";
+
+/// What a decrypted tunnel packet carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Payload<'a> {
+    /// An Ethernet frame for the adapter.
+    Frame(&'a [u8]),
+    /// A tunnel control message.
+    Control(&'a [u8]),
+}
 
 /// The decoded synthetic header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,11 +60,21 @@ pub struct FrameHeader {
 /// [`crate::tap::FRAME_BUFFER_SIZE`]).
 #[must_use]
 pub fn encode_frame(eth_frame: &[u8]) -> Vec<u8> {
+    encode(MARKER, eth_frame)
+}
+
+/// Wrap a control message in the synthetic header.
+#[must_use]
+pub fn encode_control(msg: &[u8]) -> Vec<u8> {
+    encode(CONTROL_MARKER, msg)
+}
+
+fn encode(marker: [u8; 2], eth_frame: &[u8]) -> Vec<u8> {
     let total = u16::try_from(FRAMING_HEADER + eth_frame.len()).expect("frame fits in IPv4");
     let mut buf = Vec::with_capacity(usize::from(total));
     let len = total.to_be_bytes();
     buf.extend_from_slice(&[0x45, 0x00, len[0], len[1]]);
-    buf.extend_from_slice(&[MARKER[0], MARKER[1], 0x00, 0x00]);
+    buf.extend_from_slice(&[marker[0], marker[1], 0x00, 0x00]);
     buf.extend_from_slice(&[0x40, PROTOCOL_HERMES, 0x00, 0x00]);
     buf.extend_from_slice(&[0, 0, 0, 0]);
     buf.extend_from_slice(&[0, 0, 0, 0]);
@@ -61,20 +86,36 @@ pub fn encode_frame(eth_frame: &[u8]) -> Vec<u8> {
 /// header and the Ethernet frame. `None` if the packet isn't a Hermes frame.
 #[must_use]
 pub fn decode_frame(packet: &[u8]) -> Option<(FrameHeader, &[u8])> {
-    if packet.len() < FRAMING_HEADER
-        || packet[0] != 0x45
-        || packet[4..6] != MARKER
-        || packet[9] != PROTOCOL_HERMES
-    {
+    match decode_packet(packet)? {
+        (hdr, Payload::Frame(frame)) => Some((hdr, frame)),
+        (_, Payload::Control(_)) => None,
+    }
+}
+
+/// Strip the synthetic header, telling Ethernet frames and control
+/// messages apart. `None` if the packet isn't a Hermes packet at all.
+#[must_use]
+pub fn decode_packet(packet: &[u8]) -> Option<(FrameHeader, Payload<'_>)> {
+    if packet.len() < FRAMING_HEADER || packet[0] != 0x45 || packet[9] != PROTOCOL_HERMES {
         return None;
     }
+    let control = match [packet[4], packet[5]] {
+        MARKER => false,
+        CONTROL_MARKER => true,
+        _ => return None,
+    };
     let total = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
     if total < FRAMING_HEADER || total > packet.len() {
         return None;
     }
-    let frame = &packet[FRAMING_HEADER..total];
-    let frame_len = u16::try_from(frame.len()).ok()?;
-    Some((FrameHeader { frame_len }, frame))
+    let body = &packet[FRAMING_HEADER..total];
+    let frame_len = u16::try_from(body.len()).ok()?;
+    let payload = if control {
+        Payload::Control(body)
+    } else {
+        Payload::Frame(body)
+    };
+    Some((FrameHeader { frame_len }, payload))
 }
 
 #[cfg(test)]
@@ -89,6 +130,18 @@ mod tests {
         let (hdr, out) = decode_frame(&wrapped).unwrap();
         assert_eq!(usize::from(hdr.frame_len), frame.len());
         assert_eq!(out, &frame[..]);
+    }
+
+    #[test]
+    fn control_messages_are_distinguished() {
+        let ctl = encode_control(&[1, 2, 3]);
+        assert_eq!(decode_packet(&ctl).unwrap().1, Payload::Control(&[1, 2, 3]));
+        assert!(
+            decode_frame(&ctl).is_none(),
+            "control must never reach the adapter"
+        );
+        let frame = encode_frame(&[9, 9]);
+        assert_eq!(decode_packet(&frame).unwrap().1, Payload::Frame(&[9, 9]));
     }
 
     #[test]

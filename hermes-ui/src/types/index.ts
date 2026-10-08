@@ -38,6 +38,8 @@ export interface LinkStats {
   frames_tx: number;
   frames_rx: number;
   last_handshake_secs: number;
+  /** Round-trip time from the in-tunnel latency ping; null until measured. */
+  rtt_ms: number | null;
 }
 
 export interface StateSnapshot {
@@ -49,6 +51,10 @@ export interface StateSnapshot {
   peers: Peer[];
   links: LinkStats[];
   relay_healthy: boolean | null;
+  /** Signaling server URL of the current session. */
+  signaling_url: string | null;
+  /** Plaintext ws:// to a remote host: invite codes are readable in transit. */
+  signaling_insecure: boolean;
 }
 
 export type ServerSource = "built_in" | "manifest" | "custom";

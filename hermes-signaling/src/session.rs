@@ -1,13 +1,16 @@
 //! Per-connection WebSocket session state machine.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
 use axum::extract::{
     ws::{Message, WebSocket, WebSocketUpgrade},
     State,
 };
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures::{SinkExt, StreamExt};
 use rand::RngCore;
@@ -20,17 +23,29 @@ use hermes_core::signaling::protocol::{ClientMessage, PeerInfo, ServerMessage};
 use hermes_core::room::RoomMode;
 
 use crate::rooms::{RoomRegistry, ServerRoom, Session};
+use crate::AppState;
 
 /// Default silence after which a client is considered gone: three missed
 /// client pings (every 15 s).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Axum handler: upgrade to WebSocket and run the session loop.
-pub async fn ws_handler(ws: WebSocketUpgrade, State(registry): State<RoomRegistry>) -> Response {
-    ws.on_upgrade(|socket| run_session(socket, registry))
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(app): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let ip = app.limits.client_ip(peer, &headers);
+    if !app.limits.connections.check(&ip) {
+        debug!(%ip, "connection rate limit hit");
+        return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
+    }
+    ws.on_upgrade(move |socket| run_session(socket, app, ip))
 }
 
-async fn run_session(socket: WebSocket, registry: RoomRegistry) {
+async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
+    let registry = app.registry.clone();
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // Step 1: send challenge.
@@ -194,6 +209,10 @@ async fn run_session(socket: WebSocket, registry: RoomRegistry) {
                     .await;
                     continue;
                 }
+                if !app.limits.room_ops.check(&ip) {
+                    send(&session, rate_limited()).await;
+                    continue;
+                }
                 // Creating a room implicitly leaves the current one.
                 if let Some(old) = current_room.take() {
                     leave(&registry, &old, &session).await;
@@ -214,6 +233,12 @@ async fn run_session(socket: WebSocket, registry: RoomRegistry) {
                 .await;
             }
             ClientMessage::JoinRoom { code, restore } => {
+                // Every attempt counts, so guessing invite codes is capped
+                // at a few dozen tries per minute per address.
+                if !app.limits.room_ops.check(&ip) {
+                    send(&session, rate_limited()).await;
+                    continue;
+                }
                 let restoring = restore.is_some();
                 let Some(room) = registry.find_or_restore(&code, restore) else {
                     send(
@@ -334,6 +359,13 @@ fn idle_timeout() -> Duration {
 
 async fn send(session: &Session, msg: ServerMessage) {
     let _ = session.outgoing.send(msg).await;
+}
+
+fn rate_limited() -> ServerMessage {
+    error(
+        "rate_limited",
+        "too many room requests — slow down and retry",
+    )
 }
 
 fn error(code: &str, message: &str) -> ServerMessage {

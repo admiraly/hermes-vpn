@@ -31,6 +31,8 @@ export function App() {
   const [reconnecting, setReconnecting] = useState(false);
   const [idCopied, setIdCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // URL of the current signaling server when it's plaintext to a remote host.
+  const [insecureSignaling, setInsecureSignaling] = useState<string | null>(null);
 
   const applySnapshot = (snap: StateSnapshot) => {
     setIdentity(snap.node_id_base64);
@@ -41,6 +43,7 @@ export function App() {
     setPeers(snap.peers);
     setLinks(snap.links);
     setRelayHealthy(snap.relay_healthy);
+    setInsecureSignaling(snap.signaling_insecure ? snap.signaling_url : null);
   };
 
   // One-shot state load on mount, plus the active signaling server name
@@ -70,6 +73,7 @@ export function App() {
           setPeers(snap.peers);
           setRoom(snap.room);
           setRelayHealthy(snap.relay_healthy);
+          setInsecureSignaling(snap.signaling_insecure ? snap.signaling_url : null);
         })
         .catch(() => {
           /* transient; the events channel surfaces hard failures */
@@ -229,6 +233,16 @@ export function App() {
       </header>
 
       <main className="content">
+        {connected && insecureSignaling && (
+          <div className="infobar warn" role="alert">
+            <span className="ico">⚠</span>
+            <span>
+              Unencrypted signaling: <code>{insecureSignaling}</code> uses plain ws:// to a
+              remote host, so invite codes can be read on the network — and a code is all it
+              takes to join your room. Use a wss:// server.
+            </span>
+          </div>
+        )}
         {banner && (
           <div className={`infobar ${banner.kind}`} role="alert">
             <span className="ico">{banner.kind === "bad" ? "⛔" : "⚠"}</span>

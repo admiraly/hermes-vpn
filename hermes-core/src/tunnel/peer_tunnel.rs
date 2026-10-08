@@ -11,7 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use parking_lot::Mutex;
@@ -83,7 +83,16 @@ pub struct TunnelStats {
     /// Seconds since the most recent successful handshake (0 if none yet).
     /// Refreshed each time the timer task runs.
     pub last_handshake_secs: AtomicU64,
+    /// Most recent round-trip time in microseconds, measured by the
+    /// in-tunnel ping (0 = not measured yet).
+    pub rtt_us: AtomicU64,
 }
+
+/// Seconds between latency pings (counted in timer ticks).
+const PING_EVERY_TICKS: u32 = 5;
+/// Control message types (first byte of a control payload).
+const CTL_PING: u8 = 1;
+const CTL_PONG: u8 = 2;
 
 /// A WireGuard tunnel to a single peer.
 ///
@@ -108,6 +117,10 @@ pub struct PeerTunnel {
     stats: TunnelStats,
     /// Handle to the background timer task. Aborted on drop.
     timer_task: Mutex<Option<JoinHandle<()>>>,
+    /// Time base for ping timestamps.
+    created: Instant,
+    /// Timer ticks since creation (paces the latency ping).
+    ticks: AtomicU32,
 }
 
 impl PeerTunnel {
@@ -148,6 +161,8 @@ impl PeerTunnel {
             tunn: Mutex::new(tunn),
             stats: TunnelStats::default(),
             timer_task: Mutex::new(None),
+            created: Instant::now(),
+            ticks: AtomicU32::new(0),
         });
 
         // Spawn the timer task. It holds a weak reference so the tunnel
@@ -225,28 +240,84 @@ impl PeerTunnel {
     pub async fn send(&self, eth_frame: &[u8]) -> Result<()> {
         // Wrap the Ethernet frame in our synthetic IPv4 header so boringtun
         // accepts the packet (WireGuard expects IP datagrams).
-        let wrapped = framing::encode_frame(eth_frame);
+        if self
+            .encrypt_and_send(&framing::encode_frame(eth_frame))
+            .await?
+        {
+            self.stats.frames_tx.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
 
+    /// Send a tunnel control message (not counted as a frame).
+    async fn send_control(&self, msg: &[u8]) -> Result<()> {
+        self.encrypt_and_send(&framing::encode_control(msg))
+            .await
+            .map(|_| ())
+    }
+
+    /// Encrypt a framed packet and put it on the wire. Returns `true` if a
+    /// datagram was sent now (`false` if boringtun queued it pending a
+    /// handshake).
+    async fn encrypt_and_send(&self, wrapped: &[u8]) -> Result<bool> {
         let mut dst = [0u8; DATAGRAM_BUFFER_SIZE];
         let result = {
             let mut t = self.tunn.lock();
-            t.encapsulate(&wrapped, &mut dst)
+            t.encapsulate(wrapped, &mut dst)
         };
 
         use boringtun::noise::TunnResult;
         match result {
             TunnResult::WriteToNetwork(packet) => {
                 let n = self.send_raw(packet).await?;
-                self.stats.frames_tx.fetch_add(1, Ordering::Relaxed);
                 self.stats.bytes_tx.fetch_add(n as u64, Ordering::Relaxed);
-                Ok(())
+                Ok(true)
             }
-            TunnResult::Done => Ok(()),
+            TunnResult::Done => Ok(false),
             TunnResult::Err(e) => Err(HermesError::Tunnel(format!("encap: {e:?}"))),
             TunnResult::WriteToTunnelV4(_, _) | TunnResult::WriteToTunnelV6(_, _) => {
                 warn!("unexpected tunnel-write during encapsulate");
+                Ok(false)
+            }
+        }
+    }
+
+    /// Microseconds since this tunnel was created (ping timestamps).
+    fn now_us(&self) -> u64 {
+        u64::try_from(self.created.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// Handle a decrypted control message from the peer.
+    async fn on_control(&self, msg: &[u8]) -> Result<()> {
+        let Some((&kind, rest)) = msg.split_first() else {
+            return Ok(());
+        };
+        match kind {
+            CTL_PING => {
+                // Echo the peer's timestamp back unchanged.
+                let mut pong = Vec::with_capacity(msg.len());
+                pong.push(CTL_PONG);
+                pong.extend_from_slice(rest);
+                self.send_control(&pong).await
+            }
+            CTL_PONG => {
+                if let Ok(sent) = <[u8; 8]>::try_from(rest) {
+                    let rtt = self.now_us().saturating_sub(u64::from_be_bytes(sent));
+                    // Never store 0: that means "unknown".
+                    self.stats.rtt_us.store(rtt.max(1), Ordering::Relaxed);
+                }
                 Ok(())
             }
+            _ => Ok(()),
+        }
+    }
+
+    /// Most recent measured round-trip time in milliseconds.
+    #[must_use]
+    pub fn rtt_ms(&self) -> Option<u32> {
+        match self.stats.rtt_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(u32::try_from(us.div_ceil(1000)).unwrap_or(u32::MAX)),
         }
     }
 
@@ -291,6 +362,7 @@ impl PeerTunnel {
 
         let mut dst = [0u8; DATAGRAM_BUFFER_SIZE];
         let mut eth_out: Option<BytesMut> = None;
+        let mut control: Option<Vec<u8>> = None;
 
         // First call consumes the datagram; follow-up calls pass an empty
         // slice to drain any queued outbound handshake/keepalive packets,
@@ -318,19 +390,26 @@ impl PeerTunnel {
                     continue;
                 }
                 TunnResult::WriteToTunnelV4(inner, _) | TunnResult::WriteToTunnelV6(inner, _) => {
-                    if let Some((_hdr, eth)) = framing::decode_frame(inner) {
-                        self.stats.frames_rx.fetch_add(1, Ordering::Relaxed);
-                        let mut buf = BytesMut::with_capacity(eth.len());
-                        buf.extend_from_slice(eth);
-                        eth_out = Some(buf);
-                    } else {
-                        warn!(peer = %self.peer.short(), "decrypted packet is not a Hermes frame");
+                    match framing::decode_packet(inner) {
+                        Some((_, framing::Payload::Frame(eth))) => {
+                            self.stats.frames_rx.fetch_add(1, Ordering::Relaxed);
+                            let mut buf = BytesMut::with_capacity(eth.len());
+                            buf.extend_from_slice(eth);
+                            eth_out = Some(buf);
+                        }
+                        Some((_, framing::Payload::Control(msg))) => control = Some(msg.to_vec()),
+                        None => {
+                            warn!(peer = %self.peer.short(), "decrypted packet is not a Hermes frame");
+                        }
                     }
                     break;
                 }
             }
         }
 
+        if let Some(msg) = control {
+            self.on_control(&msg).await?;
+        }
         Ok(eth_out)
     }
 
@@ -369,7 +448,26 @@ impl PeerTunnel {
                 .last_handshake_secs
                 .store(d.as_secs(), Ordering::Relaxed);
         }
+
+        // Latency ping, once a session exists (pinging before that would
+        // only queue packets behind the handshake).
+        let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
+        if since.is_some() && tick % PING_EVERY_TICKS == 0 {
+            self.send_ping().await?;
+        }
         Ok(())
+    }
+
+    /// Send a latency ping now; the peer's pong updates [`Self::rtt_ms`].
+    /// The timer task does this every few seconds on its own.
+    ///
+    /// # Errors
+    /// Fails if encryption or the socket write fails.
+    pub async fn send_ping(&self) -> Result<()> {
+        let mut ping = Vec::with_capacity(9);
+        ping.push(CTL_PING);
+        ping.extend_from_slice(&self.now_us().to_be_bytes());
+        self.send_control(&ping).await
     }
 }
 

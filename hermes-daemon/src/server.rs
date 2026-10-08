@@ -253,16 +253,12 @@ impl Server {
                 Ok(()) => ResponseBody::Ok,
                 Err(e) => ResponseBody::error("leave_room", e.to_string()),
             },
-            CommandPayload::GetPeers => {
-                let peers = self
-                    .engine
-                    .current_room()
-                    .map(|r| r.peers())
-                    .unwrap_or_default();
-                ResponseBody::Peers { peers }
-            }
+            CommandPayload::GetPeers => ResponseBody::Peers {
+                peers: self.engine.peers(),
+            },
             CommandPayload::GetState => {
                 let room = self.engine.current_room();
+                let signaling_url = self.engine.signaling_url();
                 let snap = StateSnapshot {
                     node_id_base64: self.engine.identity().node_id.to_base64(),
                     connected: self.engine.is_connected(),
@@ -279,9 +275,13 @@ impl Server {
                         mode: r.mode,
                         relay_addr: r.relay_addr.clone(),
                     }),
-                    peers: room.map(|r| r.peers()).unwrap_or_default(),
+                    peers: self.engine.peers(),
                     links: self.engine.peer_links(),
                     relay_healthy: self.engine.relay_healthy(),
+                    signaling_insecure: signaling_url
+                        .as_deref()
+                        .is_some_and(hermes_core::signaling::is_insecure_url),
+                    signaling_url,
                 };
                 ResponseBody::State(snap)
             }

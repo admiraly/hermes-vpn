@@ -101,7 +101,7 @@ public server fleet and the directory manifest.
 ## Project status
 
 The tree was reconstructed after a data loss (see the git history) and is
-whole again: every crate builds warning-free, **63 automated tests pass**
+whole again: every crate builds warning-free, **73 automated tests pass**
 (unit tests plus end-to-end suites that drive the real relay and signaling
 binaries — including a full WireGuard handshake through the relay, ICE
 hole punching between two meshes, endpoint roaming, and auto-reconnect),
@@ -130,6 +130,9 @@ runs the namespace smoke test. Open work and the roadmap live in
 - Relay registrations are Ed25519-signed with strictly-increasing
   timestamps, so captured packets cannot hijack a session.
 - Relays and signaling servers see metadata only — never plaintext.
+- Both servers rate-limit per client IP (connections, room joins — which
+  caps invite-code guessing — and relay registrations), and clients warn
+  when signaling runs over plaintext `ws://` to a remote host.
 
 ## License
 

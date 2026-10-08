@@ -126,7 +126,25 @@ if [ "$MODE" = restart ] && [ $FAIL = 0 ]; then
   grep -q "room restored" "$WORK/signaling.log" || echo "(note: restore not logged)"
 fi
 if [ $FAIL = 0 ]; then
-  echo "PASS ($MODE): A reached B at $PEER_IP over a $WANT path, incl. 1300-byte DF packets"
+  # Latency: the in-tunnel ping (every 5 s) must produce an RTT.
+  for _ in $(seq 1 12); do
+    run a "$BIN/hermes" status | grep -qE '[0-9]+ ms' && break
+    sleep 1
+  done
+  run a "$BIN/hermes" status | grep -qE '[0-9]+ ms' || { echo "no RTT measured"; FAIL=1; }
+  # Graceful shutdown: SIGTERM makes B leave the room, so A sees it go
+  # right away (not after a 45 s idle timeout).
+  for pid in $(ip netns pids hermes-b); do
+    [ "$(cat /proc/$pid/comm 2>/dev/null)" = hermes-daemon ] && kill -TERM "$pid"
+  done
+  for _ in $(seq 1 10); do
+    run a "$BIN/hermes" status | grep -q '^peers      (none)' && break
+    sleep 0.5
+  done
+  run a "$BIN/hermes" status | grep -q '^peers      (none)' || { echo "A still sees B after B's graceful shutdown"; FAIL=1; }
+fi
+if [ $FAIL = 0 ]; then
+  echo "PASS ($MODE): A reached B at $PEER_IP over a $WANT path (1300-byte DF packets, RTT measured, clean shutdown)"
 else
   echo "FAIL ($MODE) — logs in $WORK"
 fi

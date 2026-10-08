@@ -18,7 +18,7 @@ whole again:
       `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
       the UI build files (package.json, Vite/TS config, Tauri
       capabilities, placeholder icons)
-- [x] 63 tests pass on Linux, warning-free under `-D warnings`; the
+- [x] 73 tests pass on Linux, warning-free under `-D warnings`; the
       Tauri app builds on Linux
 - [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
       daemons with kernel TAP adapters in separate network namespaces.
@@ -101,13 +101,11 @@ Improvements added:
 - [x] **Removed dead TURN stub.** `nat/turn.rs` (v1 leftover, superseded by
       the relay) is gone; `nat` module docs updated. `PathKind::Relayed`
       now correctly denotes the central-relay path.
-- [ ] **First relayed packet can be dropped.** If A sends before B has
-      registered, the relay drops the `DATA` (no destination session yet).
-      WireGuard retransmits so it self-heals, and the keepalive front-loads
-      registration (2 s × 5 at startup), so in practice both peers register
-      before tunnels form — but verify connection-setup latency on the
-      two-machine test; if slow, have the relay briefly queue one packet
-      per unknown dest.
+- [x] **First relayed packet can be dropped.** The relay now holds up to
+      4 `DATA` packets per not-yet-registered destination for 3 s (4096
+      total, only from registered senders) and delivers them right after
+      the destination's registration, so the first WireGuard handshake
+      initiation no longer costs a 5 s retransmit. Unit + e2e tested.
 - [~] **Real two-machine smoke test, both modes.** The namespace smoke
       test now proves real adapters and all three room modes on Linux. Still
       needed: two separate hosts behind *real* NATs, one of them Windows
@@ -200,20 +198,31 @@ Improvements added:
       a new address once WireGuard authenticates a packet from it (tested
       with a simulated NAT rebind in `p2p_e2e`); relayed peers re-register
       from their new address. Still to verify on real Wi-Fi↔cellular.
-- [ ] **UPnP mappings are never renewed or removed.** We request a 1 h
-      lease (falling back to indefinite) and forget about it. Renew while
-      in a room; delete on leave/shutdown.
+- [x] **UPnP mapping lifecycle.** The mapping (1 h lease, or indefinite
+      if the router insists) is renewed at half-lease while the engine
+      runs, reused instead of re-mapped, and deleted on graceful daemon
+      shutdown (`HermesEngine::shutdown`, which also leaves the room so
+      peers see us go at once — verified in the netns smoke test). Not yet
+      exercised against a real router.
 
 ## P3 — security hardening
 
-- [ ] **Threat-model the relay.** Anyone who learns a room UUID can
-      `REGISTER` and inject `DATA` (WireGuard rejects it, so it's harmless
-      beyond bandwidth) — document this, and add per-IP rate limiting /
-      registration caps to blunt DoS.
-- [ ] **Enforce `wss://` for non-localhost** signaling; warn loudly on
-      plaintext `ws://` to a remote host.
-- [ ] **Rate-limit `JoinRoom`** attempts on the signaling server to slow
-      invite-code guessing (the space is large, but defense in depth).
+- [x] **Relay DoS limits.** `REGISTER` is rate-limited per source IP
+      (100/s, checked *before* the signature verification), with caps of
+      256 sessions per IP and 100 000 total; all overridable by env (see
+      SERVER-OPERATIONS.md). Still open: per-session bandwidth limits, and
+      documenting that anyone who learns a room UUID can register and
+      inject `DATA` (WireGuard rejects it; the cost is bandwidth).
+- [~] **Plaintext `ws://` to a remote host** is flagged: the engine logs a
+      warning, `GetState` reports `signaling_insecure`, and the CLI and UI
+      warn the user prominently. Deliberately *not* refused, so LAN setups
+      without TLS keep working; revisit for public builds.
+- [x] **Rate-limit signaling** per client IP: 120 connections/min (HTTP 429
+      before the upgrade) and 60 `create_room`/`join_room` attempts/min
+      (capping invite-code guessing). Behind a TLS proxy, set
+      `HERMES_SIGNALING_TRUST_PROXY=1` so the client IP comes from
+      `X-Forwarded-For` (rightmost hop) instead of the proxy's address.
+      A rate-limited automatic re-join retries after 5–10 s.
 - [ ] **Relay source-binding note.** `DATA` sender identity comes from UDP
       source address; document the E2E-encryption mitigation and consider
       binding sessions more tightly.
@@ -235,10 +244,11 @@ Improvements added:
       path through `GetState`; the UI peer list now polls (2 s) and shows
       Path / Traffic / Handshake columns. A relay e2e assertion proves the
       counters move.
-- [ ] **Wire up peer latency.** `latency_ms` and `Room::set_latency` exist
-      but are never populated ([engine_pump.rs](hermes-core/src/engine_pump.rs)) —
-      add a periodic ping/RTT probe. (Handshake-age is now shown as a
-      liveness proxy in the meantime.)
+- [x] **Peer latency.** Each tunnel sends an encrypted in-tunnel ping
+      every 5 s (a control message, never handed to the adapter); the RTT
+      appears in `LinkStats.rtt_ms`, the peers' `latency_ms`, the CLI's RTT
+      column and the UI's Latency column. Works for direct and relayed
+      peers alike.
 - [ ] **Tray menu** — `trayIcon` is configured in `tauri.conf.json` but has
       no menu/actions; add minimize-to-tray + quick room status.
 - [x] **Windows 11 Fluent redesign.** Full dark theme (design tokens in

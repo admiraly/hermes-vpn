@@ -5,6 +5,7 @@
 //! by invite code. The server relays ICE candidate lists but never
 //! touches user data or long-term secrets.
 
+mod limits;
 mod rooms;
 mod session;
 
@@ -15,7 +16,17 @@ use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+use limits::Limits;
 use rooms::RoomRegistry;
+
+/// Shared server state handed to every handler.
+#[derive(Clone)]
+pub struct AppState {
+    /// Live rooms.
+    pub registry: RoomRegistry,
+    /// Per-IP abuse limits.
+    pub limits: Limits,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,7 +39,20 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:8787".to_string())
         .parse()?;
 
-    let state = RoomRegistry::new();
+    let state = AppState {
+        registry: RoomRegistry::new(),
+        limits: Limits::from_env(),
+    };
+    {
+        let limits = state.limits.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                limits.prune();
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/health", get(health))
@@ -37,13 +61,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!(%bind, "hermes-signaling listening");
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
-async fn health(State(_): State<RoomRegistry>) -> &'static str {
+async fn health(State(_): State<AppState>) -> &'static str {
     "ok"
 }
 

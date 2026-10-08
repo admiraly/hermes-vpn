@@ -7,5 +7,5 @@
 pub mod client;
 pub mod protocol;
 
-pub use client::{Keepalive, SignalingClient};
+pub use client::{is_insecure_url, Keepalive, SignalingClient};
 pub use protocol::{ClientMessage, PeerInfo, RoomRestore, ServerMessage};

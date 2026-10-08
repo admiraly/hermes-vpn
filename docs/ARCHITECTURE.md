@@ -86,9 +86,22 @@ unless re-sent from the same address — so a captured `REGISTER` is
 useless to an attacker (verified by an e2e test). Sessions expire 60 s
 after the last refresh.
 
+A `DATA` packet for a room member that hasn't registered yet is held
+(4 per destination, 3 s, 4096 total) and forwarded right after that
+member's `REGISTER` — peers joining at the same moment no longer lose the
+first handshake initiation.
+
 The relay scopes every forward to the **sender's own room** (sender is
 identified by source address, which only registration can bind). Nodes
 in other rooms are unreachable — also covered by an e2e test.
+
+## In-tunnel control messages
+
+Inside the encrypted tunnel, a packet whose synthetic header carries the
+marker `"HC"` (instead of `"HR"` for Ethernet frames) is a control
+message, consumed by the tunnel itself. Currently: a latency ping every
+5 s (`0x01` + sender timestamp) answered by a pong (`0x02` + the same
+timestamp), giving each side the RTT shown as peer latency.
 
 ## Data path (relayed room, Windows example)
 

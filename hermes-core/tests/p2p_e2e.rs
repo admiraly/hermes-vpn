@@ -137,6 +137,17 @@ async fn ice_probe_then_tunnel_carries_frames_both_ways() {
     assert_eq!(stats.len(), 1);
     assert!(!stats[0].relayed);
     assert!(stats[0].frames_tx >= 2);
+
+    // Latency: a ping through the tunnel comes back as a measured RTT,
+    // and control traffic never surfaces as a frame.
+    let to_b_tunnel = a.mesh.tunnel(b.secret.public().node_id).unwrap();
+    to_b_tunnel.send_ping().await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while a.mesh.link_stats()[0].rtt_ms.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "no RTT measured");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(b.frames.try_recv().is_err(), "ping leaked to the adapter");
 }
 
 #[tokio::test]

@@ -60,6 +60,10 @@ pub struct LinkStats {
     /// Seconds since the most recent successful WireGuard handshake. `0`
     /// means none has completed yet (the tunnel is still coming up).
     pub last_handshake_secs: u64,
+    /// Round-trip time from the in-tunnel latency ping (`None` until the
+    /// first answer).
+    #[serde(default)]
+    pub rtt_ms: Option<u32>,
 }
 
 /// The mesh coordinator.
@@ -181,6 +185,7 @@ impl Mesh {
                     frames_tx: s.frames_tx.load(Ordering::Relaxed),
                     frames_rx: s.frames_rx.load(Ordering::Relaxed),
                     last_handshake_secs: s.last_handshake_secs.load(Ordering::Relaxed),
+                    rtt_ms: t.rtt_ms(),
                 }
             })
             .collect()

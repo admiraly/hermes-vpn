@@ -39,6 +39,37 @@ impl Default for Keepalive {
     }
 }
 
+/// Is `url` a plaintext (`ws://`) connection to a host other than this
+/// machine?
+///
+/// The signaling channel carries invite codes and NAT candidates. Its
+/// authentication can't be forged, but on a plaintext connection anyone
+/// on the path can *read* an invite code — which is all it takes to join
+/// the room. Loopback is exempt (the traffic never leaves the machine).
+#[must_use]
+pub fn is_insecure_url(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..5)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("ws://"))
+        .map(|_| &url[5..])
+    else {
+        return false; // wss:// (or not a WebSocket URL at all)
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    !loopback
+}
+
 /// Resolve once the closed flag is set (or its sender is gone). The
 /// borrowed value is dropped right away: `watch::Ref` is not `Send`.
 async fn wait_closed(rx: &mut tokio::sync::watch::Receiver<bool>) {
@@ -96,6 +127,13 @@ impl SignalingClient {
         keepalive: Keepalive,
     ) -> Result<Self> {
         info!(%url, "connecting to signaling server");
+        if is_insecure_url(url) {
+            warn!(
+                %url,
+                "signaling over plaintext ws:// to a remote host — invite codes can be \
+                 read on the network path; use wss://"
+            );
+        }
 
         let (ws_stream, _) = connect_async(url)
             .await
@@ -279,5 +317,32 @@ impl SignalingClient {
     /// Take ownership of the inbox receiver. Can only be called once.
     pub fn take_inbox(&self) -> Option<mpsc::Receiver<ServerMessage>> {
         self.incoming.lock().take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_insecure_url;
+
+    #[test]
+    fn plaintext_to_remote_hosts_is_insecure() {
+        for url in [
+            "ws://signal.example.net/v1",
+            "ws://10.0.0.5:8787/v1",
+            "ws://[2001:db8::1]:8787/v1",
+            "ws://user@host.example/v1",
+            "WS://Signal.Example.NET/v1",
+        ] {
+            assert!(is_insecure_url(url), "{url}");
+        }
+        for url in [
+            "wss://signal.example.net/v1",
+            "ws://127.0.0.1:8787/v1",
+            "ws://localhost:8787/v1",
+            "ws://[::1]:8787/v1",
+            "WSS://x/v1",
+        ] {
+            assert!(!is_insecure_url(url), "{url}");
+        }
     }
 }

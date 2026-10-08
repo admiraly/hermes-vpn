@@ -286,3 +286,35 @@ async fn wireguard_handshake_and_frame_through_relay() {
     );
     a_pump.abort();
 }
+
+/// A packet sent before its destination registers is held and delivered
+/// right after the destination's registration — the common case of two
+/// peers joining a relayed room at nearly the same moment.
+#[tokio::test]
+async fn data_sent_before_destination_registers_is_delivered() {
+    let relay = RelayProcess::spawn().await;
+    let room = RoomId::new_v4();
+    let (alice, bob) = (Client::new().await, Client::new().await);
+    alice.register(relay.addr, room).await;
+
+    alice
+        .sock
+        .send_to(&protocol::encode_data(&bob.id(), b"early bird"), relay.addr)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Bob registers: the ack comes first, then the held packet.
+    bob.register(relay.addr, room).await;
+    let got = bob
+        .recv(Duration::from_secs(2))
+        .await
+        .expect("held packet never delivered");
+    match protocol::parse_packet(&got) {
+        Some(RelayPacket::Forward { src, payload }) => {
+            assert_eq!(src, alice.id());
+            assert_eq!(payload, b"early bird");
+        }
+        other => panic!("expected FORWARD, got {other:?}"),
+    }
+}

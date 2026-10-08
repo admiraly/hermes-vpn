@@ -121,7 +121,23 @@ async fn connect(args: &[String]) -> Result<()> {
     let c = client().await?;
     expect_ok(c.call(CommandPayload::Connect { signaling_url }).await?)?;
     println!("connected to signaling server");
+    if let ResponseBody::State(s) = c.call(CommandPayload::GetState).await? {
+        if s.signaling_insecure {
+            eprintln!(
+                "{}",
+                insecure_warning(s.signaling_url.as_deref().unwrap_or("?"))
+            );
+        }
+    }
     Ok(())
+}
+
+fn insecure_warning(url: &str) -> String {
+    format!(
+        "WARNING: {url} is plaintext ws:// to a remote host. Anyone on the network \
+         path can read invite codes, and an invite code is all it takes to join \
+         a room. Use a wss:// URL (see docs/SERVER-OPERATIONS.md)."
+    )
 }
 
 async fn servers() -> Result<()> {
@@ -282,6 +298,16 @@ async fn status() -> Result<()> {
 
     println!("node       {}", s.node_id_base64);
     println!("connected  {}", s.connected);
+    if let Some(url) = &s.signaling_url {
+        println!(
+            "signaling  {url}{}",
+            if s.signaling_insecure {
+                "  (INSECURE: plaintext to a remote host)"
+            } else {
+                ""
+            }
+        );
+    }
     if let Some(l) = &s.local_endpoint {
         println!("local      {l}");
     }
@@ -314,8 +340,8 @@ async fn status() -> Result<()> {
         println!("peers      (none)");
     } else {
         println!(
-            "\n{:<16} {:<15} {:<8} {:<18} {:<10}",
-            "ALIAS", "VIRTUAL IP", "PATH", "TRAFFIC tx/rx", "HANDSHAKE"
+            "\n{:<16} {:<15} {:<8} {:<18} {:<12} {:<6}",
+            "ALIAS", "VIRTUAL IP", "PATH", "TRAFFIC tx/rx", "HANDSHAKE", "RTT"
         );
         for p in &s.peers {
             let link = links.get(&p.node_id);
@@ -338,13 +364,18 @@ async fn status() -> Result<()> {
                 Some(l) if l.bytes_tx + l.bytes_rx > 0 => "handshaking".to_string(),
                 _ => "—".to_string(),
             };
+            let rtt = link
+                .and_then(|l| l.rtt_ms)
+                .or(p.latency_ms)
+                .map_or_else(|| "—".to_string(), |ms| format!("{ms} ms"));
             println!(
-                "{:<16} {:<15} {:<8} {:<18} {:<10}",
+                "{:<16} {:<15} {:<8} {:<18} {:<12} {:<6}",
                 truncate(&p.alias, 16),
                 p.virtual_ipv4.0,
                 path,
                 traffic,
-                handshake
+                handshake,
+                rtt
             );
         }
     }
