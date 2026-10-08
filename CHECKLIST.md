@@ -119,6 +119,9 @@ Improvements added:
       It now opens one socket per local IPv4 address, re-scanned every
       30 s, and each session replies through the socket its client uses.
       The smoke test runs the relay with a wildcard bind to guard this.
+
+## P1 — platform & packaging (needed for a release)
+
 - [x] **Build & test on Linux.** Whole workspace including the Tauri app
       builds on Linux, `cargo test` passes, and the netns smoke test runs
       the daemon, Unix-socket IPC and TAP adapter for real.
