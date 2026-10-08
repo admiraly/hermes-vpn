@@ -132,6 +132,18 @@ impl VirtualIpv4 {
     /// are avoided by re-hashing with a counter.
     #[must_use]
     pub fn from_node_id(id: &NodeId, prefix: [u8; 2]) -> Self {
+        Self::from_node_id_salted(id, prefix, 0)
+    }
+
+    /// The `salt`-th usable address in this node's derivation sequence.
+    ///
+    /// Salt 0 is [`Self::from_node_id`]. When two members of a room would
+    /// collide, the signaling server gives the later joiner a higher salt
+    /// (see `ip_salt` in the signaling protocol) — a different, still
+    /// deterministic address every member computes the same way.
+    #[must_use]
+    pub fn from_node_id_salted(id: &NodeId, prefix: [u8; 2], salt: u32) -> Self {
+        let mut remaining = salt;
         let mut counter: u32 = 0;
         loop {
             let mut hasher = blake3::Hasher::new();
@@ -141,10 +153,21 @@ impl VirtualIpv4 {
             let d = hasher.finalize();
             let (hi, lo) = (d.as_bytes()[0], d.as_bytes()[1]);
             if lo != 0 && lo != 255 {
-                return Self(Ipv4Addr::new(prefix[0], prefix[1], hi, lo));
+                if remaining == 0 {
+                    return Self(Ipv4Addr::new(prefix[0], prefix[1], hi, lo));
+                }
+                remaining -= 1;
             }
-            counter += 1;
+            counter = counter.wrapping_add(1);
         }
+    }
+
+    /// The smallest salt giving `id` an address not in `taken`.
+    #[must_use]
+    pub fn free_salt(id: &NodeId, prefix: [u8; 2], taken: &[Ipv4Addr]) -> u32 {
+        (0..)
+            .find(|&salt| !taken.contains(&Self::from_node_id_salted(id, prefix, salt).0))
+            .expect("a /16 always has a free address for a room")
     }
 }
 
@@ -180,6 +203,18 @@ mod tests {
             let last = ip.octets()[3];
             assert!(last != 0 && last != 255);
         }
+    }
+
+    #[test]
+    fn salt_zero_is_the_classic_address_and_salts_differ() {
+        let id = NodeId([3; 32]);
+        let base = VirtualIpv4::from_node_id(&id, [10, 42]);
+        assert_eq!(VirtualIpv4::from_node_id_salted(&id, [10, 42], 0), base);
+        let s1 = VirtualIpv4::from_node_id_salted(&id, [10, 42], 1);
+        assert_ne!(s1, base);
+        assert_eq!(VirtualIpv4::free_salt(&id, [10, 42], &[]), 0);
+        assert_eq!(VirtualIpv4::free_salt(&id, [10, 42], &[base.0]), 1);
+        assert_eq!(VirtualIpv4::free_salt(&id, [10, 42], &[base.0, s1.0]), 2);
     }
 
     #[test]

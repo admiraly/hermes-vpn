@@ -267,6 +267,7 @@ async fn room_is_restored_after_server_restart() {
             members,
             mode,
             relay_addr,
+            ..
         } => {
             assert_eq!(*room_id, room);
             assert_eq!(*mode, RoomMode::Relayed);

@@ -1,5 +1,7 @@
 //! In-memory room registry for the signaling server.
 
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
@@ -8,8 +10,12 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use hermes_core::crypto::VirtualIpv4;
 use hermes_core::room::{InviteCode, RoomMode};
-use hermes_core::signaling::{RoomRestore, ServerMessage};
+use hermes_core::signaling::{PeerInfo, RoomRestore, ServerMessage};
+
+/// Every room's virtual subnet (10.42.0.0/16), as the clients use it.
+const SUBNET_PREFIX: [u8; 2] = [10, 42];
 
 /// A peer session on the server side.
 pub struct Session {
@@ -18,6 +24,20 @@ pub struct Session {
     pub alias: String,
     pub wireguard_public: [u8; 32],
     pub outgoing: mpsc::Sender<ServerMessage>,
+    /// IP salt in the session's current room (see `insert_member`).
+    pub ip_salt: AtomicU32,
+}
+
+impl Session {
+    /// This member as other members see it.
+    pub fn peer_info(&self) -> PeerInfo {
+        PeerInfo {
+            node_id: self.node_id,
+            wireguard_public: self.wireguard_public,
+            alias: self.alias.clone(),
+            ip_salt: self.ip_salt.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// A room as tracked by the signaling server.
@@ -37,12 +57,30 @@ impl ServerRoom {
     /// older session of the same node is still listed (its connection
     /// died but the server hasn't noticed yet, and the node reconnected),
     /// it is replaced and returned.
+    ///
+    /// The session is also given an IP salt: the smallest one under which
+    /// its virtual address is free among the *current* members. Members
+    /// already present never change address; only a newcomer whose
+    /// default address would collide gets a different one.
     pub fn insert_member(&self, session: Arc<Session>) -> Option<Arc<Session>> {
         let mut members = self.members.write();
         let replaced = members
             .iter()
             .position(|m| m.node_id == session.node_id)
             .map(|i| members.remove(i));
+        let taken: Vec<Ipv4Addr> = members
+            .iter()
+            .map(|m| {
+                VirtualIpv4::from_node_id_salted(
+                    &m.node_id,
+                    SUBNET_PREFIX,
+                    m.ip_salt.load(Ordering::Relaxed),
+                )
+                .0
+            })
+            .collect();
+        let salt = VirtualIpv4::free_salt(&session.node_id, SUBNET_PREFIX, &taken);
+        session.ip_salt.store(salt, Ordering::Relaxed);
         members.push(session);
         replaced
     }
@@ -161,5 +199,72 @@ impl RoomRegistry {
         if let Some((_, room)) = self.by_id.remove(&id) {
             self.by_invite.remove(&room.invite);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hermes_core::crypto::NodeId;
+    use std::collections::HashMap;
+
+    fn session(node_id: NodeId) -> Arc<Session> {
+        let (outgoing, _rx) = mpsc::channel(1);
+        Arc::new(Session {
+            session_id: String::new(),
+            node_id,
+            alias: String::new(),
+            wireguard_public: [0; 32],
+            outgoing,
+            ip_salt: AtomicU32::new(0),
+        })
+    }
+
+    /// Two node ids whose default (salt 0) addresses collide.
+    fn colliding_pair() -> (NodeId, NodeId) {
+        let mut seen: HashMap<Ipv4Addr, NodeId> = HashMap::new();
+        for i in 0u32.. {
+            let mut bytes = [0u8; 32];
+            bytes[..4].copy_from_slice(&i.to_le_bytes());
+            let id = NodeId(bytes);
+            let ip = VirtualIpv4::from_node_id(&id, SUBNET_PREFIX).0;
+            if let Some(&first) = seen.get(&ip) {
+                return (first, id);
+            }
+            seen.insert(ip, id);
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn colliding_newcomer_gets_a_distinct_address_and_veterans_keep_theirs() {
+        let (a, b) = colliding_pair();
+        let registry = RoomRegistry::new();
+        let room = registry.create("r".into(), RoomMode::PeerToPeer, None);
+
+        let first = session(a);
+        room.insert_member(first.clone());
+        assert_eq!(first.ip_salt.load(Ordering::Relaxed), 0);
+
+        let second = session(b);
+        room.insert_member(second.clone());
+        assert_eq!(second.ip_salt.load(Ordering::Relaxed), 1);
+
+        let ip = |s: &Session| {
+            let info = s.peer_info();
+            VirtualIpv4::from_node_id_salted(&info.node_id, SUBNET_PREFIX, info.ip_salt).0
+        };
+        assert_ne!(ip(&first), ip(&second));
+        assert_eq!(
+            first.ip_salt.load(Ordering::Relaxed),
+            0,
+            "the earlier member never moves"
+        );
+
+        // Once the first member leaves, a later joiner of that id gets salt 0 again.
+        room.remove_member(&first);
+        let again = session(a);
+        room.insert_member(again.clone());
+        assert_ne!(ip(&again), ip(&second));
     }
 }

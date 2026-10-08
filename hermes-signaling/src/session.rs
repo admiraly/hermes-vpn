@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use hermes_core::signaling::protocol::{ClientMessage, PeerInfo, ServerMessage};
+use hermes_core::signaling::protocol::{ClientMessage, ServerMessage};
 
 use hermes_core::room::RoomMode;
 
@@ -142,6 +142,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
         alias,
         wireguard_public,
         outgoing: outgoing_tx,
+        ip_salt: std::sync::atomic::AtomicU32::new(0),
     });
     info!(node = %node_id.short(), session = %session.session_id, "session authenticated");
 
@@ -228,6 +229,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                         invite_code: room.invite,
                         mode: room.mode,
                         relay_addr: room.relay_addr.clone(),
+                        ip_salt: 0,
                     },
                 )
                 .await;
@@ -259,18 +261,27 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     info!(room = %room.id, "room restored after server restart");
                 }
 
-                let peer_info = PeerInfo {
-                    node_id: session.node_id,
-                    wireguard_public: session.wireguard_public,
-                    alias: session.alias.clone(),
-                };
-                // Everyone else currently in the room (minus any stale
-                // session of this same node, which is about to be replaced).
+                // Join first: that assigns our IP salt (a fresh address if
+                // our default one is taken), which the others must learn.
+                if let Some(stale) = room.insert_member(session.clone()) {
+                    if !Arc::ptr_eq(&stale, &session) {
+                        info!(
+                            node = %session.node_id.short(),
+                            stale = %stale.session_id,
+                            "replaced stale session of a reconnecting node"
+                        );
+                    }
+                }
+                let ip_salt = session.ip_salt.load(std::sync::atomic::Ordering::Relaxed);
+                if ip_salt > 0 {
+                    info!(node = %session.node_id.short(), ip_salt, "virtual IP collision avoided");
+                }
+                let peer_info = session.peer_info();
                 let others: Vec<Arc<Session>> = room
                     .members
                     .read()
                     .iter()
-                    .filter(|m| m.node_id != session.node_id)
+                    .filter(|m| !Arc::ptr_eq(m, &session))
                     .cloned()
                     .collect();
                 for m in &others {
@@ -281,30 +292,15 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                         })
                         .await;
                 }
-                if let Some(stale) = room.insert_member(session.clone()) {
-                    if !Arc::ptr_eq(&stale, &session) {
-                        info!(
-                            node = %session.node_id.short(),
-                            stale = %stale.session_id,
-                            "replaced stale session of a reconnecting node"
-                        );
-                    }
-                }
                 current_room = Some(room.clone());
                 send(
                     &session,
                     ServerMessage::RoomJoined {
                         room_id: room.id,
-                        members: others
-                            .iter()
-                            .map(|m| PeerInfo {
-                                node_id: m.node_id,
-                                wireguard_public: m.wireguard_public,
-                                alias: m.alias.clone(),
-                            })
-                            .collect(),
+                        members: others.iter().map(|m| m.peer_info()).collect(),
                         mode: room.mode,
                         relay_addr: room.relay_addr.clone(),
+                        ip_salt,
                     },
                 )
                 .await;

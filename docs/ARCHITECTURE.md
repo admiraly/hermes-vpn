@@ -119,6 +119,15 @@ The virtual MTU is **1340** so a full-size frame survives all of the
 above plus UDP/IP inside a standard 1500-byte path without
 fragmentation.
 
+## Virtual addressing
+
+A member's virtual MAC and IPv4 are derived from its node id (BLAKE3), so
+every member computes everyone's addresses without a coordinator. IPv4
+host parts are only 16 bits, so the signaling server breaks the rare tie:
+on join it gives the newcomer an `ip_salt` — the smallest index into the
+node's derivation sequence whose address no current member uses — and
+hands it to everyone in `PeerInfo`. Salt 0 is the default address.
+
 ## Server directory
 
 `hermes-core::directory::ServerDirectory` merges three sources, by name

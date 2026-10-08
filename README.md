@@ -118,7 +118,7 @@ public server fleet and the directory manifest.
 ## Project status
 
 The tree was reconstructed after a data loss (see the git history) and is
-whole again: every crate builds warning-free, **76 automated tests pass**
+whole again: every crate builds warning-free, **78 automated tests pass**
 (unit tests plus end-to-end suites that drive the real relay and signaling
 binaries — including a full WireGuard handshake through the relay, ICE
 hole punching between two meshes, endpoint roaming, and auto-reconnect),

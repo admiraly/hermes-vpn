@@ -42,6 +42,9 @@ use crate::signaling::SignalingClient;
 use crate::tap::{AdapterConfig, PlatformAdapter, VirtualAdapter, VIRTUAL_MTU};
 use crate::tunnel::{PeerPath, PeerTunnel};
 
+/// Every room's virtual subnet: 10.42.0.0/16.
+const SUBNET_PREFIX: [u8; 2] = [10, 42];
+
 /// How long to keep probing a peer's candidates. Long enough for the
 /// peer's own probes (started when *our* candidates reach it) to open its
 /// NAT for ours.
@@ -258,6 +261,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             invite_code,
             mode,
             relay_addr,
+            ip_salt,
         } => {
             // Remember the code so an automatic reconnect can re-join.
             *state.invite.write() = Some(invite_code);
@@ -267,6 +271,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
                 format!("room-{}", &invite_code.to_string()[..4]),
                 mode,
                 relay_addr.clone(),
+                ip_salt,
             )
             .await
             {
@@ -288,6 +293,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             members,
             mode,
             relay_addr,
+            ip_salt,
         } => {
             if let Err(e) = enter_room(
                 state,
@@ -295,6 +301,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
                 format!("room-{}", &room_id.to_string()[..8]),
                 mode,
                 relay_addr.clone(),
+                ip_salt,
             )
             .await
             {
@@ -405,12 +412,27 @@ async fn enter_room(
     name: String,
     mode: RoomMode,
     relay_addr: Option<String>,
+    ip_salt: u32,
 ) -> Result<()> {
-    // Same room + running driver = a reconnect re-join. Keep the adapter
-    // and tunnels; peers get refreshed by the RoomJoined member list.
-    let rejoining = state.current_room().is_some_and(|r| r.id == room_id)
-        && state.room_rt.driver.lock().is_some();
-    info!(%room_id, %name, ?mode, rejoining, "entering room");
+    let our_node = state.secret.public().node_id;
+    let our_ip = VirtualIpv4::from_node_id_salted(&our_node, SUBNET_PREFIX, ip_salt).0;
+
+    // Same room + running driver + same address = a reconnect re-join.
+    // Keep the adapter and tunnels; peers get refreshed by the RoomJoined
+    // member list.
+    let has_driver = state.room_rt.driver.lock().is_some();
+    let rejoining = has_driver
+        && state.current_room().is_some_and(|r| r.id == room_id)
+        && state.router.own_ipv4() == Some(our_ip);
+    info!(%room_id, %name, ?mode, rejoining, %our_ip, "entering room");
+
+    // Anything else with a live runtime — switching rooms, or our address
+    // changed — must tear the old one down first: its adapter holds the
+    // interface name the new one needs, and its tunnels belong to the old
+    // room.
+    if has_driver && !rejoining {
+        tear_down_room(&state.room_rt, Some(&state.mesh)).await;
+    }
 
     // Clear any stale relay session from a previous room before we start.
     if let Some(old) = state.room_rt.relay_tasks.lock().take() {
@@ -451,9 +473,6 @@ async fn enter_room(
     let room = Arc::new(Room::new(room_id, name, mode, relay_addr));
 
     if !rejoining {
-        // Our own virtual IP within the room.
-        let our_node = state.secret.public().node_id;
-        let our_ip = VirtualIpv4::from_node_id(&our_node, room.subnet_prefix).0;
         let our_mac = VirtualMac::from_node_id(&our_node);
         // The shim answers ARP for this address on IP-only adapters.
         state.router.set_own_ipv4(Some(our_ip));
@@ -496,7 +515,7 @@ async fn on_peer_joined(state: &Arc<PumpState>, peer: PeerInfo) -> Result<()> {
     };
 
     let peer_mac = VirtualMac::from_node_id(&peer.node_id);
-    let peer_ip = VirtualIpv4::from_node_id(&peer.node_id, room.subnet_prefix);
+    let peer_ip = VirtualIpv4::from_node_id_salted(&peer.node_id, room.subnet_prefix, peer.ip_salt);
 
     // Reconnect path: if we already hold a live tunnel to this peer
     // (kept across the signaling blip), don't rebuild it — just refresh

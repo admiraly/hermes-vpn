@@ -52,20 +52,18 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    let (room_id, members, relay_addr) = loop {
+    let (room_id, members, relay_addr, ip_salt) = loop {
         match inbox.recv().await {
             Some(ServerMessage::RoomJoined {
                 room_id,
                 members,
                 mode,
                 relay_addr,
+                ip_salt,
             }) => {
                 anyhow::ensure!(mode == RoomMode::Relayed, "echo_peer needs a relayed room");
-                break (
-                    room_id,
-                    members,
-                    relay_addr.expect("relayed room has a relay"),
-                );
+                let relay = relay_addr.expect("relayed room has a relay");
+                break (room_id, members, relay, ip_salt);
             }
             Some(ServerMessage::Error { code, message }) => anyhow::bail!("{code}: {message}"),
             Some(_) => {}
@@ -77,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .find(SocketAddr::is_ipv4)
         .ok_or_else(|| anyhow::anyhow!("relay {relay_addr} has no IPv4 address"))?;
 
-    let my_ip = VirtualIpv4::from_node_id(&me, [10, 42]).0;
+    let my_ip = VirtualIpv4::from_node_id_salted(&me, [10, 42], ip_salt).0;
     let socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     let router = Arc::new(MacRouter::new(my_mac));
     router.set_own_ipv4(Some(my_ip));
@@ -142,7 +140,7 @@ async fn add_peer(
 ) -> anyhow::Result<()> {
     mesh.router.register(
         VirtualMac::from_node_id(&peer.node_id),
-        VirtualIpv4::from_node_id(&peer.node_id, [10, 42]),
+        VirtualIpv4::from_node_id_salted(&peer.node_id, [10, 42], peer.ip_salt),
         peer.node_id,
     );
     let tunnel = PeerTunnel::new(

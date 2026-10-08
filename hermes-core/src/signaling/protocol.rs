@@ -109,6 +109,9 @@ pub enum ServerMessage {
         mode: RoomMode,
         /// Relay address when the room is relayed.
         relay_addr: Option<String>,
+        /// Our own IP salt in this room (always 0 for the creator).
+        #[serde(default)]
+        ip_salt: u32,
     },
     /// We successfully joined a room.
     RoomJoined {
@@ -120,6 +123,10 @@ pub enum ServerMessage {
         mode: RoomMode,
         /// Relay address when the room is relayed.
         relay_addr: Option<String>,
+        /// Our own IP salt in this room — non-zero only if our default
+        /// address would collide with an existing member's.
+        #[serde(default)]
+        ip_salt: u32,
     },
     /// A new peer joined our current room.
     PeerJoined {
@@ -158,4 +165,9 @@ pub struct PeerInfo {
     pub wireguard_public: [u8; 32],
     /// Self-chosen display name.
     pub alias: String,
+    /// Which address in the peer's derivation sequence it uses in this
+    /// room (see `VirtualIpv4::from_node_id_salted`). Assigned by the server
+    /// so no two members share an IP; 0 for almost everyone.
+    #[serde(default)]
+    pub ip_salt: u32,
 }

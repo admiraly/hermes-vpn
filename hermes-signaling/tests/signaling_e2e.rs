@@ -88,6 +88,7 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
             invite_code,
             mode,
             relay_addr,
+            ..
         } => {
             assert_eq!(mode, RoomMode::Relayed);
             assert_eq!(relay_addr.as_deref(), Some("relay.example.net:8788"));
@@ -115,6 +116,7 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
             members,
             mode,
             relay_addr,
+            ..
         } => {
             assert_eq!(joined_id, room_id);
             assert_eq!(mode, RoomMode::Relayed);

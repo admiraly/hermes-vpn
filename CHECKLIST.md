@@ -18,7 +18,7 @@ whole again:
       `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
       the UI build files (package.json, Vite/TS config, Tauri
       capabilities, placeholder icons)
-- [x] 76 tests pass on Linux and Windows, warning-free under `-D warnings`; the
+- [x] 78 tests pass on Linux and Windows, warning-free under `-D warnings`; the
       Tauri app builds on Linux
 - [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
       daemons with kernel TAP adapters in separate network namespaces.
@@ -311,9 +311,14 @@ Improvements added:
 - [ ] **IPv6 virtual addressing** (currently a v4 `/16` per room). The
       wintun shim also drops IPv6 *unicast* (needs neighbour-discovery
       emulation); IPv6 multicast such as mDNS is carried.
-- [ ] **Virtual IP collision detection.** Addresses are a 16-bit hash of
-      the node id: ~2^-16 per pair, ~1% at 36 members. Detect on join and
-      re-derive with a salt.
+- [x] **Virtual IP collisions avoided.** Addresses are a 16-bit hash of
+      the node id (~1% chance of some collision at 36 members). The
+      signaling server now assigns each joiner an `ip_salt`: the smallest
+      one under which its address is free among current members, so
+      veterans never move and only a colliding newcomer gets the next
+      address in its (deterministic) sequence. Salt 0 = the classic
+      address, so old clients interoperate. Switching rooms (or a changed
+      address on re-join) now tears the old adapter down first.
 - [ ] **Relay metrics/stats endpoint** (the original spec mentioned one):
       Prometheus counters for sessions, forwarded bytes, drops.
 - [ ] **Multi-relay / geo-routing** — members pick the nearest relay;
