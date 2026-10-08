@@ -123,8 +123,9 @@ Improvements added:
 - [x] **Build & test on Linux.** Whole workspace including the Tauri app
       builds on Linux, `cargo test` passes, and the netns smoke test runs
       the daemon, Unix-socket IPC and TAP adapter for real.
-- [ ] **Bundle `wintun.dll`** with the Windows build/installer (must sit
-      next to `hermes-daemon.exe`); document or automate the copy.
+- [~] **Bundle `wintun.dll`** — the release workflow ships it (checksum-
+      verified) next to `hermes-daemon.exe` in the Windows zip. The MSI/NSIS
+      app installer doesn't include the daemon yet.
 - [x] **Daemon lifecycle / service install.**
       - **Linux:** `packaging/linux/install.sh` installs a hardened systemd
         unit: the daemon runs as the unprivileged `hermes` user with only
@@ -146,8 +147,11 @@ Improvements added:
 - [ ] **Real app icons & branding** — replace the generated placeholder
       [icons](hermes-ui/src-tauri/icons) with real artwork; add `.icns` if
       macOS is ever targeted.
-- [ ] **Release builds & artifacts**: `tauri build` bundles for Windows
-      (MSI/NSIS) and Linux (AppImage/deb), plus standalone server binaries.
+- [x] **Release builds & artifacts** — `.github/workflows/release.yml`:
+      push a `v*` tag to build Linux/Windows binaries, deb/AppImage and
+      MSI/NSIS app bundles, and publish them with `SHA256SUMS` as a GitHub
+      Release. Next: one installer per OS that bundles app + daemon and
+      installs the service.
 - [ ] **Set a default manifest URL** in distributed builds so the official
       fleet appears out of the box.
 - [x] `rust-toolchain.toml` pins the toolchain (1.97.0).
@@ -256,8 +260,11 @@ Improvements added:
       appears in `LinkStats.rtt_ms`, the peers' `latency_ms`, the CLI's RTT
       column and the UI's Latency column. Works for direct and relayed
       peers alike.
-- [ ] **Tray menu** — `trayIcon` is configured in `tauri.conf.json` but has
-      no menu/actions; add minimize-to-tray + quick room status.
+- [x] **Tray menu** — status line (not in a room / in a room · N peers /
+      reconnecting), *Show Hermes*, *Quit app (network stays up)*;
+      left-click shows the window and closing the window hides it to the
+      tray. Builds on Linux and Windows; not yet clicked through on a real
+      desktop.
 - [x] **Windows 11 Fluent redesign.** Full dark theme (design tokens in
       [styles.css](hermes-ui/src/styles.css)), Segoe UI Variable, header
       with connection pill + copyable node chip, InfoBar banners for
@@ -269,7 +276,7 @@ Improvements added:
       [mock.ts](hermes-ui/src/mock.ts)): `npm run dev` outside Tauri serves
       a simulated node so every screen is reviewable without a daemon or
       admin rights (`?demo=relaydown` scripts a relay incident).
-      Still open: tray menu, join link/QR, light theme variant.
+      Still open: join link/QR, light theme variant.
 
 ## P5 — testing & CI
 

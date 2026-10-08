@@ -15,9 +15,12 @@ use std::sync::Arc;
 
 use hermes_core::directory::ServerKind;
 use hermes_core::room::RoomMode;
+use hermes_daemon::protocol::Event;
 use hermes_daemon::protocol::{CommandPayload, ResponseBody, ServerListing};
 use hermes_daemon::DaemonClient;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
 use tracing::warn;
 
 struct AppState {
@@ -251,11 +254,116 @@ async fn pump_events(app: AppHandle, client: Arc<DaemonClient>) {
         warn!("event receiver already taken; not pumping events");
         return;
     };
+    let mut status = TrayStatus::default();
     while let Some(event) = rx.recv().await {
+        if status.apply(&event) {
+            set_tray_status(&app, &status.text());
+        }
         if let Err(e) = app.emit("hermes://event", &event) {
             warn!(?e, "failed to emit tauri event");
         }
     }
+    set_tray_status(&app, "Hermes service unreachable");
+}
+
+/// What the tray's status line says, derived from daemon events.
+#[derive(Default)]
+struct TrayStatus {
+    in_room: bool,
+    reconnecting: bool,
+    peers: std::collections::HashSet<hermes_core::crypto::NodeId>,
+}
+
+impl TrayStatus {
+    /// Update from an event; `true` if the text may have changed.
+    fn apply(&mut self, event: &Event) -> bool {
+        match event {
+            Event::RoomEntered { .. } => {
+                self.in_room = true;
+                self.peers.clear();
+            }
+            Event::PeerAdded { peer } => {
+                self.peers.insert(peer.node_id);
+            }
+            Event::PeerRemoved { node_id } => {
+                self.peers.remove(node_id);
+            }
+            Event::SignalingReconnecting { .. } => self.reconnecting = true,
+            Event::SignalingReconnected => self.reconnecting = false,
+            _ => return false,
+        }
+        true
+    }
+
+    fn text(&self) -> String {
+        match (self.in_room, self.reconnecting, self.peers.len()) {
+            (_, true, _) => "Reconnecting to signaling…".into(),
+            (false, false, _) => "Not in a room".into(),
+            (true, false, 1) => "In a room · 1 peer".into(),
+            (true, false, n) => format!("In a room · {n} peers"),
+        }
+    }
+}
+
+/// The tray menu's status line (a disabled menu item).
+struct TrayStatusItem(MenuItem<Wry>);
+
+fn set_tray_status(app: &AppHandle, text: &str) {
+    if let Some(item) = app.try_state::<TrayStatusItem>() {
+        let _ = item.0.set_text(text);
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(format!("Hermes — {text}")));
+    }
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Tray icon: status line, "Show Hermes", "Quit". Left-click shows the
+/// window. Quitting the app leaves the daemon (and your room) running.
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let status = MenuItem::with_id(app, "status", "Not in a room", false, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show Hermes", true, None::<&str>)?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        "Quit app (network stays up)",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(app, &[&status, &show, &quit])?;
+    app.manage(TrayStatusItem(status));
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Hermes")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
 }
 
 fn main() {
@@ -279,7 +387,22 @@ fn main() {
             refresh_servers,
             set_alias
         ])
+        // Closing the window hides it to the tray: Hermes is something you
+        // leave running. Quit from the tray menu.
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.app_handle().tray_by_id("main").is_some() {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+        })
         .setup(|app| {
+            if let Err(e) = build_tray(app) {
+                // No tray on this desktop (some Linux setups): the window
+                // then closes normally.
+                warn!(?e, "could not create tray icon");
+            }
             let handle = app.handle().clone();
             // Connect to the daemon lazily in a background task; if it
             // isn't running yet the UI stays usable for identity-free
