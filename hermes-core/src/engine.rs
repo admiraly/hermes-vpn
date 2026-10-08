@@ -40,7 +40,7 @@ use tracing::{info, warn};
 
 use crate::broadcast::MacRouter;
 use crate::crypto::{NodeSecret, VirtualMac};
-use crate::engine_pump::{self, EngineEvent, PumpHandle, PumpState, RoomRuntime};
+use crate::engine_pump::{self, EngineEvent, PumpHandle, PumpState, RoomRuntime, UpnpSlot};
 use crate::error::{HermesError, Result};
 use crate::mesh::Mesh;
 use crate::nat::Candidate;
@@ -107,6 +107,8 @@ struct SessionCtx {
     pump_handle: Arc<RwLock<Option<PumpHandle>>>,
     generation: Arc<AtomicU64>,
     my_generation: u64,
+    stun_server: String,
+    upnp: Arc<UpnpSlot>,
 }
 
 impl SessionCtx {
@@ -132,6 +134,8 @@ async fn establish(ctx: &SessionCtx) -> Result<SignalingClient> {
         room_rt: ctx.room_rt.clone(),
         invite: ctx.invite.clone(),
         cached_candidates: ctx.cached_candidates.clone(),
+        stun_server: ctx.stun_server.clone(),
+        upnp: ctx.upnp.clone(),
     });
     let handle = engine_pump::spawn(state.clone(), inbox);
 
@@ -181,9 +185,14 @@ async fn supervise(ctx: SessionCtx, mut client: SignalingClient) {
 
         // Re-join the room we were in. The pump's enter_room recognizes a
         // re-join of the same room and keeps the adapter and live tunnels.
-        let invite = ctx.invite.read().clone();
+        // The restore info lets a restarted server recreate the room.
+        let invite = *ctx.invite.read();
         if let Some(code) = invite {
-            if let Err(e) = new_client.send(ClientMessage::JoinRoom { code }).await {
+            let restore = engine_pump::restore_info(&ctx.room_rt);
+            if let Err(e) = new_client
+                .send(ClientMessage::JoinRoom { code, restore })
+                .await
+            {
                 warn!(?e, "re-join request failed");
             }
         }
@@ -214,6 +223,10 @@ pub struct HermesEngine {
     /// Cloned into every pump we spawn — keeping the sender here (rather
     /// than handing it off) is what lets the engine reconnect.
     events_tx: mpsc::Sender<EngineEvent>,
+    /// The signaling URL of the current session (for status display).
+    signaling_url: RwLock<Option<String>>,
+    /// Our UPnP port mapping (lives as long as the UDP socket).
+    upnp: Arc<UpnpSlot>,
 }
 
 impl HermesEngine {
@@ -263,6 +276,8 @@ impl HermesEngine {
             generation: Arc::new(AtomicU64::new(0)),
             events_rx: parking_lot::Mutex::new(Some(events_rx)),
             events_tx,
+            signaling_url: RwLock::new(None),
+            upnp: Arc::new(parking_lot::Mutex::new(None)),
         })
     }
 
@@ -326,8 +341,11 @@ impl HermesEngine {
             pump_handle: self.pump_handle.clone(),
             generation: self.generation.clone(),
             my_generation,
+            stun_server: self.config.stun_server.clone(),
+            upnp: self.upnp.clone(),
         };
 
+        *self.signaling_url.write() = Some(ctx.url.clone());
         let client = establish(&ctx).await?;
 
         let supervisor = tokio::spawn(supervise(ctx, client));
@@ -351,7 +369,25 @@ impl HermesEngine {
         }
         *self.pump_state.write() = None;
         *self.invite.write() = None;
+        *self.signaling_url.write() = None;
         engine_pump::tear_down_room(&self.room_rt, self.net.get().map(|n| &n.mesh)).await;
+    }
+
+    /// Graceful shutdown: leave the room (tearing down the adapter and
+    /// tunnels), disconnect from signaling, and remove our UPnP port
+    /// mapping from the router. Call before exiting; `Drop` can't do the
+    /// async parts.
+    pub async fn shutdown(&self) {
+        if self.current_room().is_some() {
+            if let Ok(state) = self.pump_state() {
+                let _ = state.signaling.send(ClientMessage::LeaveRoom).await;
+            }
+        }
+        self.disconnect().await;
+        let lease = self.upnp.lock().take();
+        if let Some(lease) = lease {
+            lease.release().await;
+        }
     }
 
     /// Create a new room.
@@ -394,7 +430,13 @@ impl HermesEngine {
         let state = self.pump_state()?;
         // Remember the code so an automatic reconnect can re-join.
         *self.invite.write() = Some(code);
-        state.signaling.send(ClientMessage::JoinRoom { code }).await
+        state
+            .signaling
+            .send(ClientMessage::JoinRoom {
+                code,
+                restore: None,
+            })
+            .await
     }
 
     /// Leave the current room, tearing down the TAP adapter and tunnels.
@@ -416,6 +458,28 @@ impl HermesEngine {
         self.room_rt.current_room.read().clone()
     }
 
+    /// The current room's peers, with `latency_ms` filled in from each
+    /// tunnel's latency ping. Empty outside a room.
+    #[must_use]
+    pub fn peers(&self) -> Vec<crate::room::PeerRecord> {
+        let Some(room) = self.current_room() else {
+            return Vec::new();
+        };
+        let mesh = self.net.get().map(|n| &n.mesh);
+        room.peers()
+            .into_iter()
+            .map(|mut p| {
+                if let Some(rtt) = mesh
+                    .and_then(|m| m.tunnel(p.node_id))
+                    .and_then(|t| t.rtt_ms())
+                {
+                    p.latency_ms = Some(rtt);
+                }
+                p
+            })
+            .collect()
+    }
+
     /// Live per-peer link statistics (empty when not connected or no
     /// tunnels are up).
     #[must_use]
@@ -433,6 +497,12 @@ impl HermesEngine {
         let net = self.net.get()?;
         net.mesh.relay()?;
         Some(net.mesh.relay_health().is_healthy())
+    }
+
+    /// The signaling server URL of the current session, if any.
+    #[must_use]
+    pub fn signaling_url(&self) -> Option<String> {
+        self.signaling_url.read().clone()
     }
 
     /// Are we connected to the signaling server right now? Detects

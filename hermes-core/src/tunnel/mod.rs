@@ -11,5 +11,7 @@
 mod framing;
 mod peer_tunnel;
 
-pub use framing::{decode_frame, encode_frame, FrameHeader};
+pub use framing::{
+    decode_frame, decode_packet, encode_control, encode_frame, FrameHeader, Payload,
+};
 pub use peer_tunnel::{PeerPath, PeerTunnel, TunnelStats};

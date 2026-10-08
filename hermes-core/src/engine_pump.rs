@@ -37,10 +37,19 @@ use crate::mesh::{self, Mesh};
 use crate::nat::{self, Candidate, PathKind};
 use crate::relay::{self, RegistrationConfig};
 use crate::room::{InviteCode, PeerRecord, PeerStatus, Room, RoomId, RoomMode};
-use crate::signaling::protocol::{ClientMessage, PeerInfo, ServerMessage};
+use crate::signaling::protocol::{ClientMessage, PeerInfo, RoomRestore, ServerMessage};
 use crate::signaling::SignalingClient;
 use crate::tap::{AdapterConfig, PlatformAdapter, VirtualAdapter, VIRTUAL_MTU};
 use crate::tunnel::{PeerPath, PeerTunnel};
+
+/// How long to keep probing a peer's candidates. Long enough for the
+/// peer's own probes (started when *our* candidates reach it) to open its
+/// NAT for ours.
+const PROBE_BUDGET: Duration = Duration::from_secs(8);
+/// Overall deadline for learning our reflexive address (DNS included).
+const STUN_BUDGET: Duration = Duration::from_secs(3);
+/// Overall deadline for gateway discovery + port mapping.
+const UPNP_BUDGET: Duration = Duration::from_secs(3);
 
 /// Events the pump emits to anyone watching (the UI, primarily).
 #[derive(Clone, Debug)]
@@ -153,7 +162,58 @@ pub(crate) struct PumpState {
     /// Cached NAT candidates — populated on first use, reused for every
     /// peer. A property of our socket, so it survives reconnects too.
     pub cached_candidates: Arc<tokio::sync::Mutex<Option<Vec<Candidate>>>>,
+    /// STUN server (`host:port`) used to learn our reflexive address.
+    pub stun_server: String,
+    /// Our UPnP port mapping, if we made one (engine-lifetime, renewed in
+    /// the background, removed on shutdown).
+    pub upnp: Arc<UpnpSlot>,
 }
+
+/// A UPnP mapping plus the task that keeps its lease alive.
+pub(crate) struct UpnpLease {
+    pub mapping: nat::upnp::UpnpMapping,
+    renewer: Option<JoinHandle<()>>,
+}
+
+impl UpnpLease {
+    fn new(mapping: nat::upnp::UpnpMapping) -> Self {
+        let renewer = mapping.renew_interval().map(|every| {
+            let m = mapping.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(every).await;
+                    if let Err(e) = m.renew().await {
+                        warn!(?e, "UPnP renewal failed — will retry");
+                    }
+                }
+            })
+        });
+        Self { mapping, renewer }
+    }
+
+    /// Stop renewing and delete the mapping from the router.
+    pub async fn release(mut self) {
+        if let Some(task) = self.renewer.take() {
+            task.abort();
+        }
+        match tokio::time::timeout(UPNP_BUDGET, self.mapping.remove()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!(?e, "UPnP removal failed"),
+            Err(_) => debug!("UPnP removal timed out"),
+        }
+    }
+}
+
+impl Drop for UpnpLease {
+    fn drop(&mut self) {
+        if let Some(task) = self.renewer.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Where the engine keeps its (at most one) UPnP lease.
+pub(crate) type UpnpSlot = parking_lot::Mutex<Option<UpnpLease>>;
 
 impl PumpState {
     fn current_room(&self) -> Option<Arc<Room>> {
@@ -258,6 +318,31 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
         }
         ServerMessage::Error { code, message } => {
             warn!(%code, %message, "signaling server error");
+            // A join we want (possibly the automatic re-join after a
+            // reconnect, when many clients behind one address re-join at
+            // once) was rate-limited: try again shortly instead of
+            // silently staying out of the room.
+            let pending_code = *state.invite.read();
+            if code == "rate_limited" {
+                if let Some(invite) = pending_code {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        let jitter = rand::random::<u64>() % 5_000;
+                        tokio::time::sleep(Duration::from_millis(5_000 + jitter)).await;
+                        // Still wanted, and still not in the room?
+                        if *state.invite.read() == Some(invite) && !state.signaling.is_closed() {
+                            let restore = restore_info(&state.room_rt);
+                            let _ = state
+                                .signaling
+                                .send(ClientMessage::JoinRoom {
+                                    code: invite,
+                                    restore,
+                                })
+                                .await;
+                        }
+                    });
+                }
+            }
             let _ = state
                 .events
                 .send(EngineEvent::SignalingError { code, message })
@@ -325,6 +410,11 @@ async fn enter_room(
         }
     }
 
+    // Keep the name the user already sees when re-joining the same room.
+    let name = match state.current_room() {
+        Some(r) if rejoining => r.name.clone(),
+        _ => name,
+    };
     let room = Arc::new(Room::new(room_id, name, mode, relay_addr));
 
     if !rejoining {
@@ -332,6 +422,8 @@ async fn enter_room(
         let our_node = state.secret.public().node_id;
         let our_ip = VirtualIpv4::from_node_id(&our_node, room.subnet_prefix).0;
         let our_mac = VirtualMac::from_node_id(&our_node);
+        // The shim answers ARP for this address on IP-only adapters.
+        state.router.set_own_ipv4(Some(our_ip));
 
         let adapter_cfg = AdapterConfig {
             name: "Hermes".to_string(),
@@ -497,43 +589,73 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
     }
 
     let socket = state.mesh.socket.clone();
-    let host = socket.local_addr().ok();
+    // The socket is bound to 0.0.0.0; advertise the LAN address instead.
+    let host = socket.local_addr().ok().and_then(nat::host_candidate_addr);
 
-    // STUN — learn our server-reflexive address.
-    let reflexive = match nat::stun::query_reflexive_address(
-        &socket,
-        nat::stun::DEFAULT_STUN_SERVER
-            .parse()
-            .unwrap_or_else(|_| "1.1.1.1:3478".parse().unwrap()),
-    )
-    .await
-    {
-        Ok(addr) => Some(addr),
-        Err(e) => {
-            debug!(?e, "STUN failed");
-            None
-        }
-    };
-
-    // UPnP — best-effort port mapping on the local router. Only useful
-    // if our host address is an IPv4 address (UPnP only targets v4).
-    let upnp = if let Some(std::net::SocketAddr::V4(v4)) = host {
-        let internal_port = v4.port();
-        let internal_ip = *v4.ip();
-        match nat::upnp::map_udp_port(internal_ip, internal_port, "Hermes").await {
-            Ok(mapped) => Some(std::net::SocketAddr::V4(mapped)),
-            Err(e) => {
-                debug!(?e, "UPnP mapping failed");
+    // STUN (our server-reflexive address) and UPnP (a router port mapping)
+    // are independent and each may stall on an unreachable network — a
+    // DNS lookup for the STUN host can hang for seconds on its own — so
+    // run them concurrently, each under a hard overall deadline.
+    let stun = async {
+        let query = async {
+            let server = resolve_ipv4(&state.stun_server).await?;
+            // The request rides the shared socket; the response comes back
+            // through the mesh demux.
+            state.mesh.stun_binding(server, STUN_BUDGET).await
+        };
+        match tokio::time::timeout(STUN_BUDGET, query).await {
+            Ok(Ok(addr)) => Some(addr),
+            Ok(Err(e)) => {
+                debug!(?e, server = %state.stun_server, "STUN failed");
+                None
+            }
+            Err(_) => {
+                debug!(server = %state.stun_server, "STUN timed out");
                 None
             }
         }
-    } else {
-        None
     };
+    // UPnP only targets IPv4. Reuse an existing mapping (gathering can
+    // re-run if STUN failed earlier) rather than mapping again.
+    let existing = state
+        .upnp
+        .lock()
+        .as_ref()
+        .map(|l| std::net::SocketAddr::V4(l.mapping.external));
+    let upnp = async {
+        if existing.is_some() {
+            return existing;
+        }
+        let Some(std::net::SocketAddr::V4(v4)) = host else {
+            return None;
+        };
+        let mapping = nat::upnp::map_udp_port(*v4.ip(), v4.port(), "Hermes");
+        match tokio::time::timeout(UPNP_BUDGET, mapping).await {
+            Ok(Ok(mapping)) => {
+                let external = std::net::SocketAddr::V4(mapping.external);
+                *state.upnp.lock() = Some(UpnpLease::new(mapping));
+                Some(external)
+            }
+            Ok(Err(e)) => {
+                debug!(?e, "UPnP mapping failed");
+                None
+            }
+            Err(_) => {
+                debug!("UPnP timed out");
+                None
+            }
+        }
+    };
+    let (reflexive, upnp) = tokio::join!(stun, upnp);
 
     let candidates = nat::ice::gather_candidates(host, upnp, reflexive, None);
     debug!(count = candidates.len(), "gathered NAT candidates");
-    *guard = Some(candidates.clone());
+    // Only cache a complete set: if STUN failed (transient network
+    // trouble), try again for the next peer rather than advertising a
+    // host-only list for the rest of the session.
+    if reflexive.is_some() {
+        *guard = Some(candidates.clone());
+    }
     candidates
 }
 
@@ -586,7 +708,7 @@ async fn probe_and_tunnel(
     };
 
     let socket = state.mesh.socket.clone();
-    let result = nat::ice::probe_candidates(&socket, &candidates, Duration::from_secs(4)).await;
+    let result = nat::ice::probe_candidates(&state.mesh, &candidates, PROBE_BUDGET).await;
 
     match result {
         Ok(path) => {
@@ -656,11 +778,19 @@ async fn probe_and_tunnel(
 
 /// Resolve a relay `host:port` string to an IPv4 socket address.
 async fn resolve_relay(addr_str: &str) -> Result<SocketAddr> {
+    resolve_ipv4(addr_str)
+        .await
+        .map_err(|e| HermesError::Room(format!("relay: {e}")))
+}
+
+/// Resolve `host:port` to its first IPv4 address. The engine socket is
+/// bound to `0.0.0.0`, so only IPv4 destinations are reachable from it.
+async fn resolve_ipv4(addr_str: &str) -> Result<SocketAddr> {
     tokio::net::lookup_host(addr_str)
         .await
-        .map_err(|e| HermesError::Room(format!("resolve relay {addr_str}: {e}")))?
+        .map_err(|e| HermesError::Nat(format!("resolve {addr_str}: {e}")))?
         .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| HermesError::Room(format!("relay {addr_str} has no IPv4 address")))
+        .ok_or_else(|| HermesError::Nat(format!("{addr_str} has no IPv4 address")))
 }
 
 /// Start the relay registration keepalive and its health watcher if they
@@ -720,6 +850,17 @@ fn ensure_relay_registration(state: &Arc<PumpState>, room_id: RoomId, relay: Soc
     });
 }
 
+/// What we remember about the current room, for a re-join that may need
+/// to restore it on a restarted server.
+pub(crate) fn restore_info(room_rt: &RoomRuntime) -> Option<RoomRestore> {
+    room_rt.current_room.read().as_ref().map(|r| RoomRestore {
+        room_id: r.id,
+        name: r.name.clone(),
+        mode: r.mode,
+        relay_addr: r.relay_addr.clone(),
+    })
+}
+
 /// Helper used by the engine when leaving a room: stops the driver and
 /// clears per-room state.
 pub(crate) async fn tear_down_room(room_rt: &RoomRuntime, mesh: Option<&Arc<Mesh>>) {
@@ -738,5 +879,7 @@ pub(crate) async fn tear_down_room(room_rt: &RoomRuntime, mesh: Option<&Arc<Mesh
         for peer in mesh.peers() {
             mesh.remove_peer(peer).await;
         }
+        mesh.router.clear();
+        mesh.router.set_own_ipv4(None);
     }
 }

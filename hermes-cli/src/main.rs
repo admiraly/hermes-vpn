@@ -121,7 +121,23 @@ async fn connect(args: &[String]) -> Result<()> {
     let c = client().await?;
     expect_ok(c.call(CommandPayload::Connect { signaling_url }).await?)?;
     println!("connected to signaling server");
+    if let ResponseBody::State(s) = c.call(CommandPayload::GetState).await? {
+        if s.signaling_insecure {
+            eprintln!(
+                "{}",
+                insecure_warning(s.signaling_url.as_deref().unwrap_or("?"))
+            );
+        }
+    }
     Ok(())
+}
+
+fn insecure_warning(url: &str) -> String {
+    format!(
+        "WARNING: {url} is plaintext ws:// to a remote host. Anyone on the network \
+         path can read invite codes, and an invite code is all it takes to join \
+         a room. Use a wss:// URL (see docs/SERVER-OPERATIONS.md)."
+    )
 }
 
 async fn servers() -> Result<()> {
@@ -129,9 +145,16 @@ async fn servers() -> Result<()> {
     let ResponseBody::Servers(list) = c.call(CommandPayload::GetServers).await? else {
         bail!("unexpected response");
     };
-    println!("signaling servers (active: {}):", list.active_signaling.as_deref().unwrap_or("<first>"));
+    println!(
+        "signaling servers (active: {}):",
+        list.active_signaling.as_deref().unwrap_or("<first>")
+    );
     for s in &list.signaling {
-        let active = if list.active_signaling.as_deref() == Some(&s.name) { "*" } else { " " };
+        let active = if list.active_signaling.as_deref() == Some(&s.name) {
+            "*"
+        } else {
+            " "
+        };
         println!("  {active} {:20} {:?}  {}", s.name, s.source, s.address);
     }
     println!("relay servers:");
@@ -200,7 +223,10 @@ async fn create(args: &[String]) -> Result<()> {
 
     let c = client().await?;
     // Subscribe before issuing the command so we don't miss the event.
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     expect_ok(
         c.call(CommandPayload::CreateRoom {
             name: (*name).to_string(),
@@ -219,7 +245,10 @@ async fn join(args: &[String]) -> Result<()> {
         bail!("usage: join <INVITE-CODE>");
     };
     let c = client().await?;
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     expect_ok(
         c.call(CommandPayload::JoinRoom {
             code: (*code).to_uppercase(),
@@ -230,9 +259,7 @@ async fn join(args: &[String]) -> Result<()> {
 }
 
 /// Wait for the daemon to confirm room entry (or surface a signaling error).
-async fn wait_for_room(
-    events: &mut tokio::sync::mpsc::Receiver<Event>,
-) -> Result<()> {
+async fn wait_for_room(events: &mut tokio::sync::mpsc::Receiver<Event>) -> Result<()> {
     loop {
         match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
             Ok(Some(Event::RoomEntered {
@@ -241,7 +268,10 @@ async fn wait_for_room(
                 relay_addr,
                 ..
             })) => {
-                println!("in room — mode {mode:?}{}", relay_addr.map_or(String::new(), |r| format!(", relay {r}")));
+                println!(
+                    "in room — mode {mode:?}{}",
+                    relay_addr.map_or(String::new(), |r| format!(", relay {r}"))
+                );
                 if let Some(code) = invite_code {
                     println!("INVITE CODE: {code}");
                     println!("(share this with the other machine, then run: hermes join {code})");
@@ -253,7 +283,9 @@ async fn wait_for_room(
             }
             Ok(Some(_)) => {} // some other event; keep waiting
             Ok(None) => bail!("daemon closed the connection"),
-            Err(_) => bail!("timed out waiting for the room (is the daemon connected? run `hermes connect`)"),
+            Err(_) => bail!(
+                "timed out waiting for the room (is the daemon connected? run `hermes connect`)"
+            ),
         }
     }
 }
@@ -266,6 +298,16 @@ async fn status() -> Result<()> {
 
     println!("node       {}", s.node_id_base64);
     println!("connected  {}", s.connected);
+    if let Some(url) = &s.signaling_url {
+        println!(
+            "signaling  {url}{}",
+            if s.signaling_insecure {
+                "  (INSECURE: plaintext to a remote host)"
+            } else {
+                ""
+            }
+        );
+    }
     if let Some(l) = &s.local_endpoint {
         println!("local      {l}");
     }
@@ -298,8 +340,8 @@ async fn status() -> Result<()> {
         println!("peers      (none)");
     } else {
         println!(
-            "\n{:<16} {:<15} {:<8} {:<18} {:<10}",
-            "ALIAS", "VIRTUAL IP", "PATH", "TRAFFIC tx/rx", "HANDSHAKE"
+            "\n{:<16} {:<15} {:<8} {:<18} {:<12} {:<6}",
+            "ALIAS", "VIRTUAL IP", "PATH", "TRAFFIC tx/rx", "HANDSHAKE", "RTT"
         );
         for p in &s.peers {
             let link = links.get(&p.node_id);
@@ -322,13 +364,18 @@ async fn status() -> Result<()> {
                 Some(l) if l.bytes_tx + l.bytes_rx > 0 => "handshaking".to_string(),
                 _ => "—".to_string(),
             };
+            let rtt = link
+                .and_then(|l| l.rtt_ms)
+                .or(p.latency_ms)
+                .map_or_else(|| "—".to_string(), |ms| format!("{ms} ms"));
             println!(
-                "{:<16} {:<15} {:<8} {:<18} {:<10}",
+                "{:<16} {:<15} {:<8} {:<18} {:<12} {:<6}",
                 truncate(&p.alias, 16),
                 p.virtual_ipv4.0,
                 path,
                 traffic,
-                handshake
+                handshake,
+                rtt
             );
         }
     }
@@ -337,7 +384,10 @@ async fn status() -> Result<()> {
 
 async fn watch() -> Result<()> {
     let c = client().await?;
-    let mut events = c.take_events().await.context("event stream already taken")?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
     println!("watching daemon events (Ctrl-C to stop)…");
     while let Some(ev) = events.recv().await {
         println!("{ev:?}");

@@ -86,9 +86,22 @@ unless re-sent from the same address — so a captured `REGISTER` is
 useless to an attacker (verified by an e2e test). Sessions expire 60 s
 after the last refresh.
 
+A `DATA` packet for a room member that hasn't registered yet is held
+(4 per destination, 3 s, 4096 total) and forwarded right after that
+member's `REGISTER` — peers joining at the same moment no longer lose the
+first handshake initiation.
+
 The relay scopes every forward to the **sender's own room** (sender is
 identified by source address, which only registration can bind). Nodes
 in other rooms are unreachable — also covered by an e2e test.
+
+## In-tunnel control messages
+
+Inside the encrypted tunnel, a packet whose synthetic header carries the
+marker `"HC"` (instead of `"HR"` for Ethernet frames) is a control
+message, consumed by the tunnel itself. Currently: a latency ping every
+5 s (`0x01` + sender timestamp) answered by a pong (`0x02` + the same
+timestamp), giving each side the RTT shown as peer latency.
 
 ## Data path (relayed room, Windows example)
 
@@ -127,6 +140,27 @@ engine.
   runs the full protocol over an in-memory pipe.
 - `hermes-relay`, `hermes-signaling` — thin binaries over `hermes-core`'s
   wire types; all room/auth/relay logic lives in small, testable files.
+
+## Signaling liveness and reconnects
+
+Signaling is control plane only; tunnels never depend on it once up. The
+engine's supervisor reconnects with backoff whenever the WebSocket dies,
+and three mechanisms make that safe:
+
+- **Keepalive.** Clients send `ping` every 15 s. Both sides treat 45 s of
+  silence as a dead connection, so a half-open TCP session (NAT timeout,
+  network switch) is noticed instead of hanging forever.
+- **One session per node.** Room membership is tracked per session, and
+  a join replaces any older session of the same node. When the stale
+  connection finally closes, the server sees it is no longer a member and
+  stays quiet — peers are only told `peer_left` about sessions that were
+  still current.
+- **Room restore.** The automatic re-join carries `restore` (room id,
+  name, mode, relay). If the server restarted and no longer knows the
+  invite code, it recreates the room under the same id and code, so every
+  member lands back in the same room and `enter_room` keeps the adapter
+  and tunnels. Knowing the code already grants membership, so this adds
+  no new power; a restore can't reuse the id of a different live room.
 
 ## Protocol versions
 

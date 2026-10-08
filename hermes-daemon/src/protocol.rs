@@ -77,7 +77,7 @@ pub enum CommandPayload {
     },
     /// Join an existing room by its 12-character invite code.
     JoinRoom {
-        /// The invite code (e.g. `WOLF-7X4K-QR2M`).
+        /// The invite code (e.g. `WLFK-7X4K-QR2S`).
         code: String,
     },
     /// Leave the current room.
@@ -189,6 +189,13 @@ pub struct StateSnapshot {
     /// Health of the current relay session: `Some(healthy)` while a
     /// relay is configured for the room, `None` otherwise.
     pub relay_healthy: Option<bool>,
+    /// The signaling server URL of the current session.
+    #[serde(default)]
+    pub signaling_url: Option<String>,
+    /// `true` if that URL is plaintext `ws://` to a remote host — invite
+    /// codes are then readable on the network path. UIs should warn.
+    #[serde(default)]
+    pub signaling_insecure: bool,
 }
 
 /// Lightweight summary of the current room (for [`StateSnapshot`]).

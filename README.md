@@ -88,7 +88,7 @@ cd hermes-ui && npm install && npx tauri dev
 
 In the UI: *Connect to signaling server* → *Create Room* → choose
 **Pure peer-to-peer** or **Via central server** → share the invite code
-(e.g. `WOLF-7X4K-QR2M`).
+(e.g. `WLFK-7X4K-QR2S`).
 
 For a full production setup — building, deploying the signaling and relay
 servers on a VPS, and installing the client on Windows/Linux, step by step
@@ -100,11 +100,23 @@ public server fleet and the directory manifest.
 
 ## Project status
 
-v2 baseline is built and tested (46 passing tests). CI
-([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests the
-engine and servers on Windows **and** Linux, type-checks the frontend, and
-builds the full Tauri app — so the cross-platform code is exercised on every
-push. Known bugs, remaining work, and the future roadmap are tracked in
+The tree was reconstructed after a data loss (see the git history) and is
+whole again: every crate builds warning-free, **73 automated tests pass**
+(unit tests plus end-to-end suites that drive the real relay and signaling
+binaries — including a full WireGuard handshake through the relay, ICE
+hole punching between two meshes, endpoint roaming, and auto-reconnect),
+and the Tauri desktop app builds.
+
+Beyond loopback tests, [`scripts/netns-smoke.sh`](scripts/netns-smoke.sh)
+runs two daemons with **real TAP adapters** in separate Linux network
+namespaces and pings across the virtual LAN. Relayed, direct P2P, and
+P2P-with-relay-fallback rooms all pass, including full-MTU packets, and a live room survives a signaling-server restart.
+The remaining gap is the same as before: a test across real NATs with a
+Windows peer ([TEST-RUN.md](TEST-RUN.md)).
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests
+on Windows and Linux, type-checks the frontend, builds the Tauri app, and
+runs the namespace smoke test. Open work and the roadmap live in
 [CHECKLIST.md](CHECKLIST.md).
 
 ## Security model
@@ -118,6 +130,9 @@ push. Known bugs, remaining work, and the future roadmap are tracked in
 - Relay registrations are Ed25519-signed with strictly-increasing
   timestamps, so captured packets cannot hijack a session.
 - Relays and signaling servers see metadata only — never plaintext.
+- Both servers rate-limit per client IP (connections, room joins — which
+  caps invite-code guessing — and relay registrations), and clients warn
+  when signaling runs over plaintext `ws://` to a remote host.
 
 ## License
 

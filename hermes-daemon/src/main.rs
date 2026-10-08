@@ -37,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Drop the server, which drops the engine.
+    // Leave the room cleanly (peers see us go immediately, the adapter is
+    // torn down) and remove our UPnP port mapping from the router.
+    server.engine().shutdown().await;
     drop(server);
     Ok(())
 }

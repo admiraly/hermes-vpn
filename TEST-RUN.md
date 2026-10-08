@@ -8,16 +8,28 @@ A concrete, copy-paste runbook for the exact setup you asked for:
 
 driven entirely by the `hermes` command-line tool (no GUI needed).
 
-> **The binaries are already built** for you under `dist/` in this repo:
+> **Build the binaries first** (see [BUILDING.md](BUILDING.md)) and stage
+> them like this — the rest of this guide refers to these folders:
+>
+> ```sh
+> # On Linux:
+> cargo build --release -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
+> mkdir -p dist/linux && cp target/release/hermes{-signaling,-relay,-daemon,} dist/linux/
+> ```
+> ```powershell
+> # On Windows (wintun.dll from https://www.wintun.net, amd64 build):
+> cargo build --release -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
+> mkdir dist\windows; copy target\release\hermes*.exe dist\windows\; copy wintun.dll dist\windows\
+> ```
 >
 > ```
 > dist/linux/    hermes-relay  hermes-signaling  hermes-daemon  hermes
 > dist/windows/  hermes-relay.exe  hermes-signaling.exe  hermes-daemon.exe  hermes.exe  wintun.dll
 > ```
 >
-> The Linux binaries are native x86-64 ELF (built in a Linux container);
-> the Windows binaries are native x86-64. Copy the folders to the matching
-> machines.
+> Before involving real machines you can rehearse the whole flow on one
+> Linux box: `sudo scripts/netns-smoke.sh relayed|p2p|fallback` runs two
+> daemons with real TAP adapters in separate network namespaces.
 
 Throughout, replace **`SERVER_IP`** with your Linux server's address
 (reachable from both clients).
@@ -38,7 +50,7 @@ sudo ufw allow 8788/udp     # relay
 # Run both. For a quick test, two terminals (or tmux); for a lasting
 # setup use the systemd units in docs/SERVER-OPERATIONS.md.
 RUST_LOG=info ./hermes-signaling      # terminal 1 → listens on 0.0.0.0:8787
-RUST_LOG=info ./hermes-relay          # terminal 2 → listens on 0.0.0.0:8788
+RUST_LOG=info ./hermes-relay          # terminal 2 → listens on every local address, port 8788
 ```
 
 Sanity check from your laptop:
@@ -125,14 +137,14 @@ It prints something like:
 
 ```
 in room — mode Relayed, relay SERVER_IP:8788
-INVITE CODE: WOLF-7X4K-QR2M
-(share this with the other machine, then run: hermes join WOLF-7X4K-QR2M)
+INVITE CODE: WLFK-7X4K-QR2S
+(share this with the other machine, then run: hermes join WLFK-7X4K-QR2S)
 ```
 
 **On the Windows client:**
 
 ```powershell
-.\hermes.exe join WOLF-7X4K-QR2M
+.\hermes.exe join WLFK-7X4K-QR2S
 ```
 
 Both should now be in the room.
@@ -152,7 +164,7 @@ You'll see the other peer with a virtual IP in `10.42.x.x`, e.g.:
 ```
 node        9f3a…
 connected  true
-room       room-WOLF [Relayed] relay=SERVER_IP:8788
+room       room-WLFK [Relayed] relay=SERVER_IP:8788
 ALIAS            VIRTUAL IP      PATH     TRAFFIC tx/rx       HANDSHAKE
 hermes-user      10.42.183.20    relayed  1.2K/0.9K          3s ago
 ```
@@ -214,7 +226,7 @@ the most interesting result to report back.
 | Linux daemon: "operation not permitted" | `sudo setcap cap_net_admin=+ep ./hermes-daemon` and `sudo modprobe tun`. |
 | `connect` fails | `curl http://SERVER_IP:8787/health` — if that fails, signaling isn't reachable (firewall / not running). Check the `ws://SERVER_IP:8787/v1` address. |
 | In a relayed room but ping fails | Relay UDP blocked: open `8788/udp` on the server **and** the cloud security group. Run the relay with `RUST_LOG=debug` to see registrations/forwards. |
-| `join` says invalid code | Codes are case-insensitive but must match exactly (e.g. `WOLF-7X4K-QR2M`); both clients must be connected to the **same** signaling server. |
+| `join` says invalid code | Codes are case-insensitive but must match exactly (e.g. `WLFK-7X4K-QR2S`); both clients must be connected to the **same** signaling server. |
 | Pings drop / large transfers stall | MTU — the adapter is pinned to 1340; if you changed it, recheck the budget. |
 
 Useful: run any server or the daemon with `RUST_LOG=debug` for a play-by-play.

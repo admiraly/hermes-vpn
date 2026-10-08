@@ -6,6 +6,52 @@ public release, **P2+** improvements and future features.
 
 ---
 
+## ✅ Recovery (October 2026)
+
+The working tree was lost and partially reconstructed from a transcript
+(commit `dbff5c7`, which did not compile). It has been rebuilt and is
+whole again:
+
+- [x] All missing modules re-implemented against their surviving call
+      sites and docs: `broadcast/*` (MAC router, ARP, wintun shim),
+      `tunnel/framing`, `room/invite_code`, `nat/stun`, `nat/upnp`, the
+      `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
+      the UI build files (package.json, Vite/TS config, Tauri
+      capabilities, placeholder icons)
+- [x] 73 tests pass on Linux, warning-free under `-D warnings`; the
+      Tauri app builds on Linux
+- [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
+      daemons with kernel TAP adapters in separate network namespaces.
+      Relayed, direct P2P and P2P→relay fallback rooms all ping across
+      the virtual LAN, including 1300-byte don't-fragment packets.
+      Also runs in CI.
+
+Bugs found and fixed while rebuilding:
+
+- [x] ICE probes and STUN responses raced the driver's `recv_from` on the
+      shared socket (replies were eaten); the probe "echo the same magic"
+      scheme would also ping-pong forever. Both now go through the mesh
+      demux, with distinct request/reply probe messages, and probing is
+      parallel with retransmits (which is what punches holes).
+- [x] Host candidate advertised `0.0.0.0:port`; now the LAN address.
+- [x] The configured STUN server was ignored (and a hostname could
+      never parse); now resolved and used.
+- [x] Linux TAP got a random kernel MAC, so the kernel dropped every
+      unicast frame peers addressed to our derived MAC. The adapter now
+      takes the virtual MAC.
+- [x] Candidate gathering ran STUN then UPnP serially with no overall
+      deadline: ~15 s to a direct path without internet. Now concurrent
+      and capped at ~3 s.
+
+Improvements added:
+
+- [x] **Anti-spoofing**: frames from a peer's tunnel must carry that
+      peer's virtual MAC, so a member can't forge traffic as another.
+- [x] **Endpoint roaming**: a datagram from an unknown address is
+      attributed via WireGuard's receiver index / handshake initiator key,
+      and the endpoint moves only after WireGuard authenticates it.
+- [x] Unique per-tunnel WireGuard indices (they were all 0).
+
 ## ✅ Done & verified (v2 baseline)
 
 - [x] Dual room modes: pure P2P and central-server (relayed), chosen at
@@ -29,8 +75,8 @@ public release, **P2+** improvements and future features.
 - [x] `hermes-cli`: GUI-free control client (connect, server directory,
       create/join, live status) — makes headless/Linux nodes drivable
 - [x] Deployment docs: DEPLOYMENT.md (full runbook) + TEST-RUN.md
-      (two-machine first-test script); binaries staged under `dist/`
-      for Linux + Windows with `wintun.dll` bundled
+      (two-machine first-test script). *(The prebuilt `dist/` binaries
+      were lost with the tree; TEST-RUN.md now says how to build them.)*
 
 ---
 
@@ -55,26 +101,28 @@ public release, **P2+** improvements and future features.
 - [x] **Removed dead TURN stub.** `nat/turn.rs` (v1 leftover, superseded by
       the relay) is gone; `nat` module docs updated. `PathKind::Relayed`
       now correctly denotes the central-relay path.
-- [ ] **First relayed packet can be dropped.** If A sends before B has
-      registered, the relay drops the `DATA` (no destination session yet).
-      WireGuard retransmits so it self-heals, and the keepalive front-loads
-      registration (2 s × 5 at startup), so in practice both peers register
-      before tunnels form — but verify connection-setup latency on the
-      two-machine test; if slow, have the relay briefly queue one packet
-      per unknown dest.
-- [ ] **Real two-machine smoke test, both modes.** All automation so far is
-      loopback. Run daemon+UI on two separate hosts behind real NAT:
-      verify a P2P room actually hole-punches and a relayed room forwards.
+- [x] **First relayed packet can be dropped.** The relay now holds up to
+      4 `DATA` packets per not-yet-registered destination for 3 s (4096
+      total, only from registered senders) and delivers them right after
+      the destination's registration, so the first WireGuard handshake
+      initiation no longer costs a 5 s retransmit. Unit + e2e tested.
+- [~] **Real two-machine smoke test, both modes.** The namespace smoke
+      test now proves real adapters and all three room modes on Linux. Still
+      needed: two separate hosts behind *real* NATs, one of them Windows
+      (wintun + shim have only been compiled and unit-tested, never run).
+      Follow [TEST-RUN.md](TEST-RUN.md).
+- [x] **Relay replies from the wrong address on multi-homed hosts.** A
+      wildcard-bound relay answered from whichever local IP routed back,
+      and clients dropped those replies (found by the netns smoke test).
+      It now opens one socket per local IPv4 address, re-scanned every
+      30 s, and each session replies through the socket its client uses.
+      The smoke test runs the relay with a wildcard bind to guard this.
 
 ## P1 — platform & packaging (needed for a release)
 
-- [~] **Build & test on Linux.** The full workspace (minus the Tauri UI)
-      **compiles cleanly on Linux** — verified by a native build in a Linux
-      Docker container that produced the `dist/linux` binaries, exercising
-      `tap/linux.rs` and the Unix-socket IPC for the first time. Still
-      pending: running `cargo test` on a Linux host (the CI job in
-      [.github/workflows/ci.yml](.github/workflows/ci.yml) does this on
-      every push once the repo is on GitHub) and a real Linux runtime test.
+- [x] **Build & test on Linux.** Whole workspace including the Tauri app
+      builds on Linux, `cargo test` passes, and the netns smoke test runs
+      the daemon, Unix-socket IPC and TAP adapter for real.
 - [ ] **Bundle `wintun.dll`** with the Windows build/installer (must sit
       next to `hermes-daemon.exe`); document or automate the copy.
 - [ ] **Daemon lifecycle / service install.** Today the daemon is launched
@@ -97,7 +145,7 @@ public release, **P2+** improvements and future features.
       (MSI/NSIS) and Linux (AppImage/deb), plus standalone server binaries.
 - [ ] **Set a default manifest URL** in distributed builds so the official
       fleet appears out of the box.
-- [ ] Add a `rust-toolchain.toml` (channel pin) for reproducible CI builds.
+- [x] `rust-toolchain.toml` pins the toolchain (1.97.0).
 
 ## P2 — resilience
 
@@ -112,6 +160,20 @@ public release, **P2+** improvements and future features.
       signaling binary (kill → restart → reconnected; silent after
       explicit disconnect). New events: `SignalingReconnecting{attempt}`,
       `SignalingReconnected`.
+- [x] **Reconnect correctness** (found by code review, fixed with tests
+      against the real server in `session_lifecycle_e2e.rs`):
+      - a stale session of a reconnecting node used to be removed *by node
+        id* when it finally died — kicking the live session too and
+        telling every peer the node left. Membership is now per session;
+        stale entries are replaced on join and leave silently.
+      - half-open connections went unnoticed (client side: forever).
+        Clients ping every 15 s; both sides drop 45 s of silence.
+      - a signaling restart wiped all rooms, so auto re-join failed with
+        `invalid_code` forever. Re-joins carry restore info and the server
+        recreates the room under the same id and code.
+      - joining a second room didn't leave the first.
+      The netns smoke test's `restart` mode proves a live P2P room
+      survives a signaling restart with its tunnel intact.
 - [x] **Automatic P2P → relay fallback.** A P2P room can now carry an
       optional fallback relay (set at creation; checkbox in the UI). When a
       peer's direct path can't be established, the engine registers with
@@ -132,19 +194,35 @@ public release, **P2+** improvements and future features.
       Still open (folded into P6 multi-relay): switching to a *backup*
       relay mid-room — today the relay address is room-wide and fixed at
       creation.
-- [ ] **Re-key / endpoint roaming.** Verify long-lived tunnels survive the
-      client's public address changing (Wi-Fi↔cellular) in both modes.
+- [~] **Re-key / endpoint roaming.** Direct tunnels now follow a peer to
+      a new address once WireGuard authenticates a packet from it (tested
+      with a simulated NAT rebind in `p2p_e2e`); relayed peers re-register
+      from their new address. Still to verify on real Wi-Fi↔cellular.
+- [x] **UPnP mapping lifecycle.** The mapping (1 h lease, or indefinite
+      if the router insists) is renewed at half-lease while the engine
+      runs, reused instead of re-mapped, and deleted on graceful daemon
+      shutdown (`HermesEngine::shutdown`, which also leaves the room so
+      peers see us go at once — verified in the netns smoke test). Not yet
+      exercised against a real router.
 
 ## P3 — security hardening
 
-- [ ] **Threat-model the relay.** Anyone who learns a room UUID can
-      `REGISTER` and inject `DATA` (WireGuard rejects it, so it's harmless
-      beyond bandwidth) — document this, and add per-IP rate limiting /
-      registration caps to blunt DoS.
-- [ ] **Enforce `wss://` for non-localhost** signaling; warn loudly on
-      plaintext `ws://` to a remote host.
-- [ ] **Rate-limit `JoinRoom`** attempts on the signaling server to slow
-      invite-code guessing (the space is large, but defense in depth).
+- [x] **Relay DoS limits.** `REGISTER` is rate-limited per source IP
+      (100/s, checked *before* the signature verification), with caps of
+      256 sessions per IP and 100 000 total; all overridable by env (see
+      SERVER-OPERATIONS.md). Still open: per-session bandwidth limits, and
+      documenting that anyone who learns a room UUID can register and
+      inject `DATA` (WireGuard rejects it; the cost is bandwidth).
+- [~] **Plaintext `ws://` to a remote host** is flagged: the engine logs a
+      warning, `GetState` reports `signaling_insecure`, and the CLI and UI
+      warn the user prominently. Deliberately *not* refused, so LAN setups
+      without TLS keep working; revisit for public builds.
+- [x] **Rate-limit signaling** per client IP: 120 connections/min (HTTP 429
+      before the upgrade) and 60 `create_room`/`join_room` attempts/min
+      (capping invite-code guessing). Behind a TLS proxy, set
+      `HERMES_SIGNALING_TRUST_PROXY=1` so the client IP comes from
+      `X-Forwarded-For` (rightmost hop) instead of the proxy's address.
+      A rate-limited automatic re-join retries after 5–10 s.
 - [ ] **Relay source-binding note.** `DATA` sender identity comes from UDP
       source address; document the E2E-encryption mitigation and consider
       binding sessions more tightly.
@@ -166,10 +244,11 @@ public release, **P2+** improvements and future features.
       path through `GetState`; the UI peer list now polls (2 s) and shows
       Path / Traffic / Handshake columns. A relay e2e assertion proves the
       counters move.
-- [ ] **Wire up peer latency.** `latency_ms` and `Room::set_latency` exist
-      but are never populated ([engine_pump.rs](hermes-core/src/engine_pump.rs)) —
-      add a periodic ping/RTT probe. (Handshake-age is now shown as a
-      liveness proxy in the meantime.)
+- [x] **Peer latency.** Each tunnel sends an encrypted in-tunnel ping
+      every 5 s (a control message, never handed to the adapter); the RTT
+      appears in `LinkStats.rtt_ms`, the peers' `latency_ms`, the CLI's RTT
+      column and the UI's Latency column. Works for direct and relayed
+      peers alike.
 - [ ] **Tray menu** — `trayIcon` is configured in `tauri.conf.json` but has
       no menu/actions; add minimize-to-tray + quick room status.
 - [x] **Windows 11 Fluent redesign.** Full dark theme (design tokens in
@@ -197,8 +276,9 @@ public release, **P2+** improvements and future features.
       cover the full TAP↔mesh path without privileges.
 - [ ] **Frame-parser fuzzing** for the relay protocol, framing, ARP, and
       classifier parsers.
-- [ ] **P2P ICE path test** — exercise candidate gather/probe/tunnel in a
-      two-socket loopback harness (mirrors the relay e2e test).
+- [x] **P2P ICE path test** — `hermes-core/tests/p2p_e2e.rs`: two meshes
+      probe each other, build direct tunnels, carry unicast + broadcast
+      frames; plus roaming, spoofing and STUN-through-demux tests.
 - [x] Clippy in CI with the existing `#![warn(clippy::pedantic)]` lints
       (runs informationally — pedantic is intentionally noisy, so it
       surfaces suggestions without failing the build).
@@ -210,7 +290,12 @@ public release, **P2+** improvements and future features.
       wintun L2/L3 shim already does).
 - [ ] **Mobile** (Android via Tauri 2 mobile + VpnService) — likely
       relay-only given platform NAT constraints.
-- [ ] **IPv6 virtual addressing** (currently a v4 `/16` per room).
+- [ ] **IPv6 virtual addressing** (currently a v4 `/16` per room). The
+      wintun shim also drops IPv6 *unicast* (needs neighbour-discovery
+      emulation); IPv6 multicast such as mDNS is carried.
+- [ ] **Virtual IP collision detection.** Addresses are a 16-bit hash of
+      the node id: ~2^-16 per pair, ~1% at 36 members. Detect on join and
+      re-derive with a salt.
 - [ ] **Relay metrics/stats endpoint** (the original spec mentioned one):
       Prometheus counters for sessions, forwarded bytes, drops.
 - [ ] **Multi-relay / geo-routing** — members pick the nearest relay;

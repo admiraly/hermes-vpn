@@ -1,7 +1,8 @@
 // Demo backend for browser previews (no Tauri, no daemon). Simulates a
 // node with a plausible little network so every screen and state of the
 // UI is reachable: connect, create/join a room, peers appearing with
-// live traffic, and (via ?demo=relaydown) a relay-health incident.
+// live traffic, (via ?demo=relaydown) a relay-health incident, and (via
+// ?demo=insecure) a plaintext ws:// signaling server.
 
 import type {
   DaemonEvent,
@@ -68,6 +69,8 @@ function nodeId(seed: string): string {
   return btoa(`${seed}-${h}`).replace(/[+/=]/g, "").padEnd(43, "x").slice(0, 43);
 }
 
+const insecureDemo = new URLSearchParams(location.search).get("demo") === "insecure";
+
 function snapshot(): StateSnapshot {
   return {
     node_id_base64: nodeId("this-machine"),
@@ -78,6 +81,8 @@ function snapshot(): StateSnapshot {
     peers: state.peers,
     links: state.links,
     relay_healthy: state.relayHealthy,
+    signaling_url: state.connected ? (insecureDemo ? "ws" : "wss") + "://signal.example.net/v1" : null,
+    signaling_insecure: state.connected && insecureDemo,
   };
 }
 
@@ -109,6 +114,7 @@ function addDemoPeer(i: number) {
       frames_tx: 80,
       frames_rx: 64,
       last_handshake_secs: 1,
+      rtt_ms: relayed ? 38 + i * 3 : 9 + i * 4,
     });
   }, 700 + i * 900);
   state.timers.push(t);
@@ -123,6 +129,9 @@ function startTicking() {
       l.frames_rx += Math.floor(Math.random() * 30);
       l.last_handshake_secs = Math.min(l.last_handshake_secs + 2, 120);
       if (l.last_handshake_secs >= 118) l.last_handshake_secs = 2;
+      if (l.rtt_ms !== null) {
+        l.rtt_ms = Math.max(1, l.rtt_ms + Math.round((Math.random() - 0.5) * 6));
+      }
     }
   }, 2000) as unknown as number;
   state.timers.push(t);
@@ -137,7 +146,7 @@ function enterRoom(name: string, mode: RoomMode, relay: string | null, created: 
     relay_addr: relay,
   };
   state.relayHealthy = relay ? true : null;
-  state.invite = created ? "WOLF-7X4K-QR2M" : null;
+  state.invite = created ? "WLFK-7X4K-QR2S" : null;
   emit({
     event: "room_entered",
     room_id: state.room.id,

@@ -35,6 +35,7 @@ export function PeerList({
           <th>Path</th>
           <th>Traffic ↑ / ↓</th>
           <th>Handshake</th>
+          <th>Latency</th>
         </tr>
       </thead>
       <tbody>
@@ -51,6 +52,7 @@ export function PeerList({
                 {link ? `${fmtBytes(link.bytes_tx)} / ${fmtBytes(link.bytes_rx)}` : "—"}
               </td>
               <td className="mono">{renderHandshake(link)}</td>
+              <td className="mono">{renderLatency(link?.rtt_ms ?? peer.latency_ms)}</td>
             </tr>
           );
         })}
@@ -105,6 +107,10 @@ function renderPath(status: PeerStatus, link?: LinkStats) {
       <span className="dot" /> direct
     </span>
   );
+}
+
+function renderLatency(ms: number | null | undefined): string {
+  return ms == null ? "—" : `${ms} ms`;
 }
 
 function renderHandshake(link?: LinkStats): string {

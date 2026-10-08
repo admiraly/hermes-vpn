@@ -54,8 +54,6 @@ boringtun = "0.7"
 
 # NAT traversal
 igd-next = "0.14"    # UPnP
-stun_codec = "0.3"   # STUN message codec
-bytecodec = "0.4"
 
 # Observability
 tracing = "0.1"

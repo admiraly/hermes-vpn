@@ -31,7 +31,10 @@ impl SignalingProcess {
         };
         // Wait for the listener to come up.
         for _ in 0..50 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
                 return proc;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -95,7 +98,10 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
 
     // Bob joins by invite code and must learn the same mode + relay.
     bob_client
-        .send(ClientMessage::JoinRoom { code: invite })
+        .send(ClientMessage::JoinRoom {
+            code: invite,
+            restore: None,
+        })
         .await
         .unwrap();
 
@@ -245,7 +251,10 @@ async fn p2p_room_fallback_relay_propagates_to_joiner() {
     };
 
     frank_client
-        .send(ClientMessage::JoinRoom { code: invite })
+        .send(ClientMessage::JoinRoom {
+            code: invite,
+            restore: None,
+        })
         .await
         .unwrap();
 

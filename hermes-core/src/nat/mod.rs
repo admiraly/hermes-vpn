@@ -10,10 +10,10 @@
 //! 3. [`ice`] — exchange candidate lists with the remote peer through
 //!    the signaling server, then attempt simultaneous UDP opens.
 //!
-//! If traversal fails (e.g. symmetric NAT on both ends), the answer is to
-//! create the room in **relayed** mode instead — see [`crate::relay`].
-//! That central-server path is a deliberate, room-wide choice rather than
-//! an automatic per-peer TURN fallback, so it lives outside this module.
+//! If traversal fails (e.g. symmetric NAT on both ends) and the room has
+//! a fallback relay, the engine routes just that peer through the relay
+//! (see `engine_pump::probe_and_tunnel` and [`crate::relay`]); otherwise
+//! the peer is marked stale.
 //!
 //! The output of this pipeline is a [`TraversalResult`] containing the
 //! `SocketAddr` boringtun should send to plus the classification of the
@@ -23,7 +23,7 @@ pub mod ice;
 pub mod stun;
 pub mod upnp;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
@@ -70,4 +70,31 @@ pub enum CandidateKind {
     /// A relay-forwarded address. Reserved for an automatic per-peer relay
     /// fallback; rooms select relaying explicitly today (see [`crate::relay`]).
     Relayed,
+}
+
+/// The IPv4 address of the interface that carries our default route —
+/// what a LAN peer should use to reach us directly.
+///
+/// The engine's socket is bound to `0.0.0.0`, so its `local_addr()` says
+/// nothing useful. Connecting a throwaway UDP socket to a public address
+/// makes the OS pick the outbound interface without sending a packet.
+#[must_use]
+pub fn primary_local_ipv4() -> Option<Ipv4Addr> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?; // TEST-NET-1; never actually sent to
+    match probe.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() => Some(v4),
+        _ => None,
+    }
+}
+
+/// Turn the socket's bound address into a usable host candidate:
+/// a wildcard bind is replaced by the primary LAN address.
+#[must_use]
+pub fn host_candidate_addr(bound: SocketAddr) -> Option<SocketAddr> {
+    if bound.ip().is_unspecified() {
+        primary_local_ipv4().map(|ip| SocketAddr::new(IpAddr::V4(ip), bound.port()))
+    } else {
+        Some(bound)
+    }
 }

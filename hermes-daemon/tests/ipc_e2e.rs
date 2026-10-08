@@ -8,10 +8,8 @@ use hermes_daemon::protocol::{CommandPayload, ResponseBody};
 use hermes_daemon::{DaemonClient, Server};
 
 fn test_config(tag: &str) -> EngineConfig {
-    let data_dir = std::env::temp_dir().join(format!(
-        "hermes-ipc-test-{tag}-{}",
-        std::process::id()
-    ));
+    let data_dir =
+        std::env::temp_dir().join(format!("hermes-ipc-test-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&data_dir);
     EngineConfig {
         data_dir,

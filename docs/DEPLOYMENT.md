@@ -183,6 +183,13 @@ See [BUILDING.md](../BUILDING.md) for toolchain detail and gotchas.
    Without a proxy it's `ws://your-server:8787/v1` (unencrypted control
    channel — fine for a LAN/testing, not for the public internet).
 
+   Behind the proxy, tell the server to trust it so per-client rate limits
+   see real client IPs: add `Environment=HERMES_SIGNALING_TRUST_PROXY=1`
+   to the unit (then `sudo systemctl daemon-reload && sudo systemctl
+   restart hermes-signaling`), and bind it to `127.0.0.1:8787` so only the
+   proxy can reach it. Clients using a plaintext `ws://` URL see a warning
+   in the CLI and the app.
+
 5. **Firewall**: open `8787/tcp` (or `443/tcp` if only the proxy is public).
    ```sh
    sudo ufw allow 8787/tcp
@@ -219,6 +226,10 @@ already WireGuard ciphertext; registrations are Ed25519-signed).
    sudo ufw allow 8788/udp
    ```
    Your client relay address is **`your-server:8788`**.
+
+> **Multi-homed server?** No action needed: a wildcard-bound relay
+> listens on each local address separately and replies from the one each
+> client used. See [SERVER-OPERATIONS.md](SERVER-OPERATIONS.md#running-a-relay-server).
 
 > You can run the signaling and relay servers on the **same** VPS — they
 > use different ports and protocols (8787/tcp vs 8788/udp).
