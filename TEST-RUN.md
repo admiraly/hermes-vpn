@@ -50,7 +50,7 @@ sudo ufw allow 8788/udp     # relay
 # Run both. For a quick test, two terminals (or tmux); for a lasting
 # setup use the systemd units in docs/SERVER-OPERATIONS.md.
 RUST_LOG=info ./hermes-signaling      # terminal 1 → listens on 0.0.0.0:8787
-HERMES_RELAY_BIND=SERVER_IP:8788 RUST_LOG=info ./hermes-relay   # terminal 2
+RUST_LOG=info ./hermes-relay          # terminal 2 → listens on every local address, port 8788
 ```
 
 Sanity check from your laptop:

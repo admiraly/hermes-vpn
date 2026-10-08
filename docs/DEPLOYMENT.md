@@ -220,11 +220,9 @@ already WireGuard ciphertext; registrations are Ed25519-signed).
    ```
    Your client relay address is **`your-server:8788`**.
 
-> **Multi-homed server?** If the VPS has more than one IPv4 address, bind
-> the relay to the public one (`HERMES_RELAY_BIND=<public-ip>:8788`).
-> With `0.0.0.0` the kernel may answer from a different local address
-> than the one clients sent to, and clients drop those replies. See
-> [SERVER-OPERATIONS.md](SERVER-OPERATIONS.md#running-a-relay-server).
+> **Multi-homed server?** No action needed: a wildcard-bound relay
+> listens on each local address separately and replies from the one each
+> client used. See [SERVER-OPERATIONS.md](SERVER-OPERATIONS.md#running-a-relay-server).
 
 > You can run the signaling and relay servers on the **same** VPS — they
 > use different ports and protocols (8787/tcp vs 8788/udp).

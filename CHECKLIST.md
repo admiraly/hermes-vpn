@@ -113,15 +113,12 @@ Improvements added:
       needed: two separate hosts behind *real* NATs, one of them Windows
       (wintun + shim have only been compiled and unit-tested, never run).
       Follow [TEST-RUN.md](TEST-RUN.md).
-- [ ] **Relay replies from the wrong address on multi-homed hosts.** A
-      relay bound to `0.0.0.0` answers from whichever local IP routes back
-      to the client; clients (and their NATs) drop replies from an
-      unexpected address. Documented workaround: bind to the public IP.
-      Real fix: answer from the packet's destination address
-      (`IP_PKTINFO`), or bind one socket per local address.
-
-## P1 — platform & packaging (needed for a release)
-
+- [x] **Relay replies from the wrong address on multi-homed hosts.** A
+      wildcard-bound relay answered from whichever local IP routed back,
+      and clients dropped those replies (found by the netns smoke test).
+      It now opens one socket per local IPv4 address, re-scanned every
+      30 s, and each session replies through the socket its client uses.
+      The smoke test runs the relay with a wildcard bind to guard this.
 - [x] **Build & test on Linux.** Whole workspace including the Tauri app
       builds on Linux, `cargo test` passes, and the netns smoke test runs
       the daemon, Unix-socket IPC and TAP adapter for real.

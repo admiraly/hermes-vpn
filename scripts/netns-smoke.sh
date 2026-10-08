@@ -63,9 +63,10 @@ fi
 rm -rf "$WORK"; mkdir -p "$WORK/a" "$WORK/b" /run/hermes-smoke-a /run/hermes-smoke-b
 export RUST_LOG=${RUST_LOG:-info}
 HERMES_SIGNALING_BIND=0.0.0.0:8787 "$BIN/hermes-signaling" >"$WORK/signaling.log" 2>&1 &
-# Bind the relay to one address: on a multi-homed host a wildcard bind
-# answers from whichever interface routes back, which clients reject.
-HERMES_RELAY_BIND=$RELAY "$BIN/hermes-relay" >"$WORK/relay.log" 2>&1 &
+# Wildcard bind on purpose: the root namespace is multi-homed (one address
+# per veth), and B reaches the relay via A's side address — the relay must
+# still answer B from the address B sent to.
+HERMES_RELAY_BIND=${RELAY_BIND:-0.0.0.0:8788} "$BIN/hermes-relay" >"$WORK/relay.log" 2>&1 &
 sleep 0.5
 run() { local n=$1; shift; ip netns exec hermes-$n env HOME="$WORK/$n" XDG_RUNTIME_DIR=/run/hermes-smoke-$n "$@"; }
 run a "$BIN/hermes-daemon" >"$WORK/daemon-a.log" 2>&1 &
