@@ -118,7 +118,7 @@ public server fleet and the directory manifest.
 ## Project status
 
 The tree was reconstructed after a data loss (see the git history) and is
-whole again: every crate builds warning-free, **73 automated tests pass**
+whole again: every crate builds warning-free, **76 automated tests pass**
 (unit tests plus end-to-end suites that drive the real relay and signaling
 binaries — including a full WireGuard handshake through the relay, ICE
 hole punching between two meshes, endpoint roaming, and auto-reconnect),
@@ -128,12 +128,14 @@ Beyond loopback tests, [`scripts/netns-smoke.sh`](scripts/netns-smoke.sh)
 runs two daemons with **real TAP adapters** in separate Linux network
 namespaces and pings across the virtual LAN. Relayed, direct P2P, and
 P2P-with-relay-fallback rooms all pass, including full-MTU packets, and a live room survives a signaling-server restart.
-The remaining gap is the same as before: a test across real NATs with a
-Windows peer ([TEST-RUN.md](TEST-RUN.md)).
+On Windows, CI runs the daemon with a real wintun adapter on GitHub's
+runners and pings a headless echo peer through the relay — by hand and
+installed as a Windows service. The remaining gap is a test across real
+NATs between separate machines ([TEST-RUN.md](TEST-RUN.md)).
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) builds and tests
 on Windows and Linux, type-checks the frontend, builds the Tauri app, and
-runs the namespace smoke test. Open work and the roadmap live in
+runs both smoke tests. Open work and the roadmap live in
 [CHECKLIST.md](CHECKLIST.md).
 
 ## Security model

@@ -18,7 +18,7 @@ whole again:
       `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
       the UI build files (package.json, Vite/TS config, Tauri
       capabilities, placeholder icons)
-- [x] 73 tests pass on Linux, warning-free under `-D warnings`; the
+- [x] 76 tests pass on Linux and Windows, warning-free under `-D warnings`; the
       Tauri app builds on Linux
 - [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
       daemons with kernel TAP adapters in separate network namespaces.
@@ -106,11 +106,15 @@ Improvements added:
       total, only from registered senders) and delivers them right after
       the destination's registration, so the first WireGuard handshake
       initiation no longer costs a 5 s retransmit. Unit + e2e tested.
-- [~] **Real two-machine smoke test, both modes.** The namespace smoke
-      test now proves real adapters and all three room modes on Linux. Still
-      needed: two separate hosts behind *real* NATs, one of them Windows
-      (wintun + shim have only been compiled and unit-tested, never run).
-      Follow [TEST-RUN.md](TEST-RUN.md).
+- [~] **Real two-machine smoke test, both modes.** Covered in CI so far:
+      the Linux namespace smoke test (real TAP adapters; relayed, P2P,
+      fallback, signaling restart, systemd-style service) and the **Windows
+      smoke test** on GitHub's Windows runners — a real wintun adapter,
+      the L2/L3 shim and the relay, pinged end to end by the headless echo
+      peer, both with the daemon run by hand and installed as a Windows
+      service. Still needed: two separate hosts behind *real* NATs (P2P
+      hole punching across the internet) and Windows↔Linux traffic over a
+      direct path. Follow [TEST-RUN.md](TEST-RUN.md).
 - [x] **Relay replies from the wrong address on multi-homed hosts.** A
       wildcard-bound relay answered from whichever local IP routed back,
       and clients dropped those replies (found by the netns smoke test).
@@ -140,8 +144,8 @@ Improvements added:
         `%ProgramData%\Hermes`). The pipe now has an explicit ACL
         (SYSTEM/Admins full, authenticated users read/write), refuses
         remote clients, and claims its name exclusively on the first
-        instance (no pipe squatting). Compiles and builds in CI; **not yet
-        run on a real Windows machine.**
+        instance (no pipe squatting). Exercised in CI on a real Windows
+        runner: install → CLI over the pipe → room traffic → uninstall.
       - Still open: a one-click installer (MSI/NSIS) wrapping this, and the
         Tauri app offering to install the service.
 - [ ] **Real app icons & branding** — replace the generated placeholder

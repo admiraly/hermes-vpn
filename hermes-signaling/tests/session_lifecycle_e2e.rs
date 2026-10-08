@@ -26,13 +26,17 @@ impl Server {
         if let Some(secs) = idle_timeout_secs {
             cmd.env("HERMES_SIGNALING_IDLE_TIMEOUT_SECS", secs.to_string());
         }
-        let child = cmd.spawn().expect("spawn hermes-signaling");
+        // Wrap immediately so Drop kills the process even if we panic below.
+        let server = Self {
+            child: cmd.spawn().expect("spawn hermes-signaling"),
+            port,
+        };
         for _ in 0..50 {
             if tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .is_ok()
             {
-                return Self { child, port };
+                return server;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
