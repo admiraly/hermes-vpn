@@ -88,7 +88,7 @@ cd hermes-ui && npm install && npx tauri dev
 
 In the UI: *Connect to signaling server* → *Create Room* → choose
 **Pure peer-to-peer** or **Via central server** → share the invite code
-(e.g. `WOLF-7X4K-QR2M`).
+(e.g. `WLFK-7X4K-QR2S`).
 
 For a full production setup — building, deploying the signaling and relay
 servers on a VPS, and installing the client on Windows/Linux, step by step

@@ -151,7 +151,7 @@ export function CreateOrJoinRoom() {
           <div className="stack">
             <input
               className="code-input"
-              placeholder="WOLF-7X4K-QR2M"
+              placeholder="WLFK-7X4K-QR2S"
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
               maxLength={14}

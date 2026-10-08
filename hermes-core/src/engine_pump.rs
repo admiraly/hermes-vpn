@@ -46,8 +46,10 @@ use crate::tunnel::{PeerPath, PeerTunnel};
 /// peer's own probes (started when *our* candidates reach it) to open its
 /// NAT for ours.
 const PROBE_BUDGET: Duration = Duration::from_secs(8);
-/// How long to wait for the STUN server.
+/// Overall deadline for learning our reflexive address (DNS included).
 const STUN_BUDGET: Duration = Duration::from_secs(3);
+/// Overall deadline for gateway discovery + port mapping.
+const UPNP_BUDGET: Duration = Duration::from_secs(3);
 
 /// Events the pump emits to anyone watching (the UI, primarily).
 #[derive(Clone, Debug)]
@@ -511,35 +513,48 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
     // The socket is bound to 0.0.0.0; advertise the LAN address instead.
     let host = socket.local_addr().ok().and_then(nat::host_candidate_addr);
 
-    // STUN — learn our server-reflexive address. The request rides the
-    // shared socket and the response comes back through the mesh demux.
-    let reflexive = match resolve_ipv4(&state.stun_server).await {
-        Ok(server) => match state.mesh.stun_binding(server, STUN_BUDGET).await {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                debug!(?e, "STUN failed");
+    // STUN (our server-reflexive address) and UPnP (a router port mapping)
+    // are independent and each may stall on an unreachable network — a
+    // DNS lookup for the STUN host can hang for seconds on its own — so
+    // run them concurrently, each under a hard overall deadline.
+    let stun = async {
+        let query = async {
+            let server = resolve_ipv4(&state.stun_server).await?;
+            // The request rides the shared socket; the response comes back
+            // through the mesh demux.
+            state.mesh.stun_binding(server, STUN_BUDGET).await
+        };
+        match tokio::time::timeout(STUN_BUDGET, query).await {
+            Ok(Ok(addr)) => Some(addr),
+            Ok(Err(e)) => {
+                debug!(?e, server = %state.stun_server, "STUN failed");
                 None
             }
-        },
-        Err(e) => {
-            debug!(?e, server = %state.stun_server, "STUN server unresolvable");
-            None
+            Err(_) => {
+                debug!(server = %state.stun_server, "STUN timed out");
+                None
+            }
         }
     };
-
-    // UPnP — best-effort port mapping on the local router. Only useful
-    // if our host address is an IPv4 address (UPnP only targets v4).
-    let upnp = if let Some(std::net::SocketAddr::V4(v4)) = host {
-        match nat::upnp::map_udp_port(*v4.ip(), v4.port(), "Hermes").await {
-            Ok(mapped) => Some(std::net::SocketAddr::V4(mapped)),
-            Err(e) => {
+    // UPnP only targets IPv4.
+    let upnp = async {
+        let Some(std::net::SocketAddr::V4(v4)) = host else {
+            return None;
+        };
+        let mapping = nat::upnp::map_udp_port(*v4.ip(), v4.port(), "Hermes");
+        match tokio::time::timeout(UPNP_BUDGET, mapping).await {
+            Ok(Ok(mapped)) => Some(std::net::SocketAddr::V4(mapped)),
+            Ok(Err(e)) => {
                 debug!(?e, "UPnP mapping failed");
                 None
             }
+            Err(_) => {
+                debug!("UPnP timed out");
+                None
+            }
         }
-    } else {
-        None
     };
+    let (reflexive, upnp) = tokio::join!(stun, upnp);
 
     let candidates = nat::ice::gather_candidates(host, upnp, reflexive, None);
     debug!(count = candidates.len(), "gathered NAT candidates");

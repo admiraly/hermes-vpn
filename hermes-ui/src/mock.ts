@@ -137,7 +137,7 @@ function enterRoom(name: string, mode: RoomMode, relay: string | null, created: 
     relay_addr: relay,
   };
   state.relayHealthy = relay ? true : null;
-  state.invite = created ? "WOLF-7X4K-QR2M" : null;
+  state.invite = created ? "WLFK-7X4K-QR2S" : null;
   emit({
     event: "room_entered",
     room_id: state.room.id,

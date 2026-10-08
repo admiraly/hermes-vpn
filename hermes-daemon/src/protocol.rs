@@ -77,7 +77,7 @@ pub enum CommandPayload {
     },
     /// Join an existing room by its 12-character invite code.
     JoinRoom {
-        /// The invite code (e.g. `WOLF-7X4K-QR2M`).
+        /// The invite code (e.g. `WLFK-7X4K-QR2S`).
         code: String,
     },
     /// Leave the current room.

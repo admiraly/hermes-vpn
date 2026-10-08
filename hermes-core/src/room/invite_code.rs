@@ -149,6 +149,12 @@ mod tests {
     }
 
     #[test]
+    fn documented_example_code_is_valid() {
+        // Used in the UI placeholder, README and TEST-RUN.md.
+        assert!("WLFK-7X4K-QR2S".parse::<InviteCode>().is_ok());
+    }
+
+    #[test]
     fn parsing_is_lenient_about_case_and_separators() {
         let code = InviteCode::generate();
         let sloppy = code.to_string().to_lowercase().replace('-', " ");
