@@ -50,7 +50,7 @@ jobs:
       - name: Package binaries
         run: |
           name=hermes-${TAG}-linux-x86_64
-          mkdir -p "$name/packaging"
+          mkdir -p "$name"
           cp target/release/hermes-signaling target/release/hermes-relay \
              target/release/hermes-daemon target/release/hermes "$name/"
           cp packaging/linux/install.sh packaging/linux/hermes-daemon.service "$name/"
