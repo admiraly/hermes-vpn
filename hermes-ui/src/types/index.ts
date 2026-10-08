@@ -44,6 +44,8 @@ export interface LinkStats {
 
 export interface StateSnapshot {
   node_id_base64: string;
+  /** Our display name, as peers see it. */
+  alias: string;
   connected: boolean;
   local_endpoint: string | null;
   reflexive_endpoint: string | null;

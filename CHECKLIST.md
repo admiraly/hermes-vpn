@@ -238,8 +238,10 @@ Improvements added:
 
 ## P4 — UX / UI polish
 
-- [ ] **Editable alias** — currently hardcoded `"hermes-user"`
-      ([engine.rs default config](hermes-core/src/engine.rs)); add a setting.
+- [x] **Editable alias** — defaults to the machine's hostname instead of
+      `"hermes-user"`; change it with `hermes alias <name>` or *Settings →
+      This device* in the app. Persisted in the daemon's data dir; peers see
+      it from the next signaling connection.
 - [x] **Copy-invite-code button** — added to the room view (clipboard).
       A shareable join link/QR is still open.
 - [x] **Show which signaling server is active** — the connect screen now

@@ -261,6 +261,7 @@ impl Server {
                 let signaling_url = self.engine.signaling_url();
                 let snap = StateSnapshot {
                     node_id_base64: self.engine.identity().node_id.to_base64(),
+                    alias: self.engine.alias(),
                     connected: self.engine.is_connected(),
                     local_endpoint: self.engine.local_endpoint().map(|a| a.to_string()),
                     reflexive_endpoint: self
@@ -323,6 +324,10 @@ impl Server {
                     Err(e) => ResponseBody::error("refresh_servers", e.to_string()),
                 }
             }
+            CommandPayload::SetAlias { alias } => match self.engine.set_alias(&alias) {
+                Ok(_) => ResponseBody::Ok,
+                Err(e) => ResponseBody::error("set_alias", e.to_string()),
+            },
             CommandPayload::Goodbye => ResponseBody::Ok,
         }
     }

@@ -30,6 +30,7 @@ interface DemoState {
   connected: boolean;
   room: StateSnapshot["room"];
   invite: string | null;
+  alias: string;
   peers: Peer[];
   links: LinkStats[];
   relayHealthy: boolean | null;
@@ -40,6 +41,7 @@ interface DemoState {
 const state: DemoState = {
   connected: false,
   room: null,
+  alias: "this-machine",
   invite: null,
   peers: [],
   links: [],
@@ -74,6 +76,7 @@ const insecureDemo = new URLSearchParams(location.search).get("demo") === "insec
 function snapshot(): StateSnapshot {
   return {
     node_id_base64: nodeId("this-machine"),
+    alias: state.alias,
     connected: state.connected,
     local_endpoint: state.connected ? "192.168.1.34:52913" : null,
     reflexive_endpoint: state.connected ? "84.163.20.77:52913" : null,
@@ -239,6 +242,12 @@ export async function mockInvoke(cmd: string, args?: Record<string, unknown>): P
       return null;
     case "refresh_servers":
       return null;
+    case "set_alias": {
+      const alias = String(args?.alias ?? "").trim();
+      if (!alias || alias.length > 32) throw new Error("display name must be 1–32 characters");
+      state.alias = alias;
+      return null;
+    }
     default:
       throw new Error(`demo backend: unknown command ${cmd}`);
   }

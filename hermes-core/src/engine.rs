@@ -59,7 +59,8 @@ pub struct EngineConfig {
     pub data_dir: PathBuf,
     /// Signaling server URL (ws:// or wss://).
     pub signaling_url: String,
-    /// Self-chosen display name.
+    /// Display name used when none has been saved with
+    /// [`HermesEngine::set_alias`]. Defaults to the machine's hostname.
     pub alias: String,
     /// Bind address for our UDP socket (`0.0.0.0:0` = random port).
     pub bind_addr: SocketAddr,
@@ -75,11 +76,49 @@ impl Default for EngineConfig {
         Self {
             data_dir,
             signaling_url: crate::DEFAULT_SIGNALING_URL.to_string(),
-            alias: "hermes-user".to_string(),
+            alias: default_alias(),
             bind_addr: "0.0.0.0:0".parse().unwrap(),
             stun_server: crate::nat::stun::DEFAULT_STUN_SERVER.to_string(),
         }
     }
+}
+
+/// Longest accepted display name, in characters.
+pub const MAX_ALIAS_CHARS: usize = 32;
+/// File in the data directory holding a user-chosen alias.
+const ALIAS_FILE: &str = "alias.txt";
+
+/// The machine's hostname, as a sensible default display name.
+fn default_alias() -> String {
+    let from_os = std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    from_os
+        .and_then(|h| normalize_alias(&h).ok())
+        .unwrap_or_else(|| "hermes-user".to_string())
+}
+
+/// Validate and tidy a display name: trimmed, 1–32 characters, no
+/// control characters.
+///
+/// # Errors
+/// Returns a message describing what's wrong with the name.
+pub fn normalize_alias(alias: &str) -> std::result::Result<String, String> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Err("display name can't be empty".into());
+    }
+    if alias.chars().any(char::is_control) {
+        return Err("display name can't contain control characters".into());
+    }
+    if alias.chars().count() > MAX_ALIAS_CHARS {
+        return Err(format!(
+            "display name is limited to {MAX_ALIAS_CHARS} characters"
+        ));
+    }
+    Ok(alias.to_string())
 }
 
 /// The long-lived network stack: one UDP socket (bound once, so tunnels
@@ -227,6 +266,8 @@ pub struct HermesEngine {
     signaling_url: RwLock<Option<String>>,
     /// Our UPnP port mapping (lives as long as the UDP socket).
     upnp: Arc<UpnpSlot>,
+    /// Current display name (saved alias, else the configured default).
+    alias: RwLock<String>,
 }
 
 impl HermesEngine {
@@ -261,6 +302,12 @@ impl HermesEngine {
 
         info!(node_id = %secret.public().node_id, "engine identity loaded");
 
+        let alias = std::fs::read_to_string(config.data_dir.join(ALIAS_FILE))
+            .ok()
+            .and_then(|a| normalize_alias(&a).ok())
+            .or_else(|| normalize_alias(&config.alias).ok())
+            .unwrap_or_else(default_alias);
+
         let (events_tx, events_rx) = mpsc::channel(128);
 
         Ok(Self {
@@ -278,6 +325,7 @@ impl HermesEngine {
             events_tx,
             signaling_url: RwLock::new(None),
             upnp: Arc::new(parking_lot::Mutex::new(None)),
+            alias: RwLock::new(alias),
         })
     }
 
@@ -329,7 +377,7 @@ impl HermesEngine {
             url: signaling_url
                 .unwrap_or(&self.config.signaling_url)
                 .to_string(),
-            alias: self.config.alias.clone(),
+            alias: self.alias(),
             secret: self.secret.clone(),
             events: self.events_tx.clone(),
             mesh: net.mesh.clone(),
@@ -499,6 +547,25 @@ impl HermesEngine {
         Some(net.mesh.relay_health().is_healthy())
     }
 
+    /// Our display name, as peers see it.
+    #[must_use]
+    pub fn alias(&self) -> String {
+        self.alias.read().clone()
+    }
+
+    /// Change and persist our display name. Peers learn the new name the
+    /// next time we connect to signaling (it travels in the `Hello`).
+    ///
+    /// # Errors
+    /// Fails if the name is invalid (see [`normalize_alias`]) or can't be
+    /// saved.
+    pub fn set_alias(&self, alias: &str) -> Result<String> {
+        let alias = normalize_alias(alias).map_err(HermesError::Room)?;
+        std::fs::write(self.config.data_dir.join(ALIAS_FILE), &alias)?;
+        *self.alias.write() = alias.clone();
+        Ok(alias)
+    }
+
     /// The signaling server URL of the current session, if any.
     #[must_use]
     pub fn signaling_url(&self) -> Option<String> {
@@ -552,5 +619,41 @@ impl Drop for HermesEngine {
             handle.abort();
         }
         info!("engine shutting down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alias_validation() {
+        assert_eq!(normalize_alias("  Lisa's PC  ").unwrap(), "Lisa's PC");
+        assert!(normalize_alias("   ").is_err());
+        assert!(normalize_alias("bad\nname").is_err());
+        assert!(normalize_alias(&"x".repeat(33)).is_err());
+        assert!(
+            normalize_alias(&"é".repeat(32)).is_ok(),
+            "limit counts characters, not bytes"
+        );
+        assert!(normalize_alias(&default_alias()).is_ok());
+    }
+
+    #[test]
+    fn alias_persists_across_restarts() {
+        let dir = std::env::temp_dir().join(format!("hermes-alias-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = EngineConfig {
+            data_dir: dir.clone(),
+            alias: "configured".into(),
+            ..EngineConfig::default()
+        };
+        let engine = HermesEngine::new(config.clone()).unwrap();
+        assert_eq!(engine.alias(), "configured");
+        engine.set_alias(" renamed ").unwrap();
+        assert!(engine.set_alias("").is_err());
+        drop(engine);
+        assert_eq!(HermesEngine::new(config).unwrap().alias(), "renamed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

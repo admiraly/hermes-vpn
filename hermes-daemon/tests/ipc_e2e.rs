@@ -122,3 +122,32 @@ async fn server_directory_management_over_ipc() {
 
     let _ = std::fs::remove_dir_all(data_dir);
 }
+
+#[tokio::test]
+async fn display_name_round_trip() {
+    let (data_dir, client) = connect_pair("alias").await;
+
+    let body = client
+        .call(CommandPayload::SetAlias {
+            alias: "  Lisa's desktop ".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(body, ResponseBody::Ok), "{body:?}");
+
+    match client.call(CommandPayload::GetState).await.unwrap() {
+        ResponseBody::State(snap) => assert_eq!(snap.alias, "Lisa's desktop"),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // Invalid names are refused with a clear error.
+    let body = client
+        .call(CommandPayload::SetAlias {
+            alias: "   ".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(body, ResponseBody::Error { .. }), "{body:?}");
+
+    let _ = std::fs::remove_dir_all(data_dir);
+}

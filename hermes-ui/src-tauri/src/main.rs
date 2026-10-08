@@ -234,6 +234,16 @@ async fn refresh_servers(state: State<'_, AppState>) -> Result<(), String> {
     flatten(body).map(|_| ())
 }
 
+#[tauri::command]
+async fn set_alias(state: State<'_, AppState>, alias: String) -> Result<(), String> {
+    let client = state.client().await?;
+    let body = client
+        .call(CommandPayload::SetAlias { alias })
+        .await
+        .map_err(|e| e.to_string())?;
+    flatten(body).map(|_| ())
+}
+
 /// Pump events from the daemon into Tauri's event bus so the webview
 /// can subscribe with `listen('hermes://event', …)`.
 async fn pump_events(app: AppHandle, client: Arc<DaemonClient>) {
@@ -266,7 +276,8 @@ fn main() {
             remove_server,
             set_active_signaling,
             set_manifest_url,
-            refresh_servers
+            refresh_servers,
+            set_alias
         ])
         .setup(|app| {
             let handle = app.handle().clone();

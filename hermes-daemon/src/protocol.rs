@@ -117,6 +117,12 @@ pub enum CommandPayload {
     },
     /// Re-fetch the operator manifest now.
     RefreshServers,
+    /// Change our display name (persisted; peers see it from the next
+    /// signaling connection).
+    SetAlias {
+        /// New display name (1–32 characters).
+        alias: String,
+    },
     /// Graceful connection close.
     Goodbye,
 }
@@ -171,6 +177,9 @@ pub enum ResponseBody {
 pub struct StateSnapshot {
     /// Our node identity as URL-safe base64.
     pub node_id_base64: String,
+    /// Our display name.
+    #[serde(default)]
+    pub alias: String,
     /// Have we connected to the signaling server?
     pub connected: bool,
     /// Local UDP endpoint we bound (host candidate). `None` until the

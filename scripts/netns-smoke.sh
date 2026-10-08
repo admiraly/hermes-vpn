@@ -27,7 +27,7 @@ RELAY=10.200.1.1:8788
 cleanup() {
   pkill -x hermes-daemon 2>/dev/null
   pkill -x hermes-relay 2>/dev/null
-  pkill -f "^$BIN/hermes-signaling" 2>/dev/null
+  pkill -x hermes-signalin 2>/dev/null # comm is truncated to 15 chars
   iptables -D FORWARD -s 10.200.1.0/24 -d 10.200.2.0/24 -j DROP 2>/dev/null
   iptables -D FORWARD -s 10.200.2.0/24 -d 10.200.1.0/24 -j DROP 2>/dev/null
   while iptables -D FORWARD -s 10.200.0.0/16 -d 10.200.0.0/16 -j ACCEPT 2>/dev/null; do :; done
@@ -71,6 +71,15 @@ fi
 
 # --- servers + daemons ------------------------------------------------------
 rm -rf "$WORK"; mkdir -p "$WORK/a" "$WORK/b" /run/hermes-smoke-a /run/hermes-smoke-b
+if [ "$MODE" = service ]; then
+  # Unprivileged users must be able to execute the binaries; the checkout
+  # may sit under a private home directory (GitHub's runners: 0750). Stage
+  # them like install.sh does with /usr/local/bin.
+  install -d -m 0755 "$WORK/bin"
+  install -m 0755 "$BIN"/hermes "$BIN"/hermes-daemon "$BIN"/hermes-relay "$BIN"/hermes-signaling "$WORK/bin/"
+  chmod 0755 "$WORK"
+  BIN=$WORK/bin
+fi
 export RUST_LOG=${RUST_LOG:-info}
 start_signaling() {
   HERMES_SIGNALING_BIND=0.0.0.0:8787 "$BIN/hermes-signaling" >>"$WORK/signaling.log" 2>&1 &
@@ -96,7 +105,6 @@ if [ "$MODE" = service ]; then
   # which only root could open.
   chmod 0666 /dev/net/tun
   install -d -o hermes -g hermes -m 0700 "$WORK/a-state"
-  chmod o+rx "$WORK" "$BIN" 2>/dev/null || true
   ip netns exec hermes-a env STATE_DIRECTORY="$WORK/a-state" \
     setpriv --reuid hermes --regid hermes --init-groups \
       --inh-caps +net_admin --ambient-caps +net_admin --bounding-set -all,+net_admin \
@@ -160,7 +168,7 @@ if [ "$MODE" = restart ] && [ $FAIL = 0 ]; then
   # Kill signaling: rooms vanish from its memory. Both daemons must
   # reconnect, restore the same room, and keep their live tunnel.
   ROOM_BEFORE=$(run b "$BIN/hermes" status | grep '^room')
-  pkill -f "^$BIN/hermes-signaling"
+  pkill -x hermes-signalin
   sleep 2
   start_signaling
   for _ in $(seq 1 40); do

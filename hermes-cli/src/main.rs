@@ -27,6 +27,7 @@ async fn main() {
 
     let result = match cmd {
         "identity" => identity().await,
+        "alias" => alias(rest).await,
         "connect" => connect(rest).await,
         "servers" => servers().await,
         "add-server" => add_server(rest).await,
@@ -60,6 +61,7 @@ fn print_help() {
          \x20 hermes <command> [args]\n\n\
          COMMANDS:\n\
          \x20 identity                              print this node's id\n\
+         \x20 alias [<name>]                        show or change this node's display name\n\
          \x20 connect [--signaling <ws-url>]        connect to a signaling server\n\
          \x20                                       (default: the directory's active one)\n\
          \x20 servers                               list known signaling/relay servers\n\
@@ -114,6 +116,29 @@ async fn identity() -> Result<()> {
         }
         other => bail!("unexpected response: {other:?}"),
     }
+}
+
+async fn alias(args: &[String]) -> Result<()> {
+    let c = client().await?;
+    if args.is_empty() {
+        let ResponseBody::State(s) = c.call(CommandPayload::GetState).await? else {
+            bail!("unexpected response");
+        };
+        println!("{}", s.alias);
+        return Ok(());
+    }
+    let alias = args.join(" ");
+    expect_ok(
+        c.call(CommandPayload::SetAlias {
+            alias: alias.clone(),
+        })
+        .await?,
+    )?;
+    println!(
+        "display name set to {:?} (peers see it the next time you connect)",
+        alias.trim()
+    );
+    Ok(())
 }
 
 async fn connect(args: &[String]) -> Result<()> {
@@ -297,6 +322,7 @@ async fn status() -> Result<()> {
     };
 
     println!("node       {}", s.node_id_base64);
+    println!("alias      {}", s.alias);
     println!("connected  {}", s.connected);
     if let Some(url) = &s.signaling_url {
         println!(

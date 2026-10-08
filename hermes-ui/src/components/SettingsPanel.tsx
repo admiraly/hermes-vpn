@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "../api";
-import type { ServerEntry, ServerListing } from "../types";
+import type { ServerEntry, ServerListing, StateSnapshot } from "../types";
 
 const sourceLabel: Record<ServerEntry["source"], string> = {
   built_in: "built-in",
@@ -65,6 +65,7 @@ export function SettingsPanel({
   const [newName, setNewName] = useState("");
   const [newAddress, setNewAddress] = useState("");
   const [manifestUrl, setManifestUrl] = useState("");
+  const [alias, setAlias] = useState("");
 
   const reload = useCallback(() => {
     invoke<ServerListing>("get_servers")
@@ -77,6 +78,11 @@ export function SettingsPanel({
   }, [onActiveChanged]);
 
   useEffect(reload, [reload]);
+  useEffect(() => {
+    invoke<StateSnapshot>("get_state")
+      .then((s) => setAlias(s.alias))
+      .catch(() => {});
+  }, []);
 
   const run = async (action: () => Promise<unknown>, success?: string) => {
     setError(null);
@@ -101,7 +107,7 @@ export function SettingsPanel({
   return (
     <>
       <div className="settings-head">
-        <h2>Servers</h2>
+        <h2>Settings</h2>
         <button onClick={onClose}>Done</button>
       </div>
 
@@ -117,6 +123,30 @@ export function SettingsPanel({
           <span>{info}</span>
         </div>
       )}
+
+      <div className="card">
+        <h3>This device</h3>
+        <p className="sub">
+          The name other room members see. Takes effect the next time you
+          connect.
+        </p>
+        <div className="row">
+          <input
+            placeholder="Display name"
+            value={alias}
+            maxLength={32}
+            onChange={(e) => setAlias(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button
+            className="primary"
+            disabled={!alias.trim()}
+            onClick={() => run(() => invoke("set_alias", { alias }), "Display name saved")}
+          >
+            Save
+          </button>
+        </div>
+      </div>
 
       <div className="card">
         <h3>Signaling servers</h3>

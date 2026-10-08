@@ -65,6 +65,22 @@ hermes/
 └── docs/              # Architecture & operations guides
 ```
 
+## Download
+
+Prebuilt binaries are attached to each
+[GitHub Release](https://github.com/admiraly/hermes-vpn/releases):
+
+| File | What it is |
+|---|---|
+| `hermes-<ver>-linux-x86_64.tar.gz` | Servers, daemon, CLI + `install.sh` / systemd unit |
+| `hermes-<ver>-windows-x86_64.zip` | Servers, daemon, CLI + `wintun.dll` |
+| `*.deb`, `*.AppImage` | Desktop app for Linux |
+| `*.msi`, `*-setup.exe` | Desktop app for Windows |
+| `SHA256SUMS` | Checksums for all of the above |
+
+Install the daemon as a service ([DEPLOYMENT.md §5](docs/DEPLOYMENT.md#5-install--run-the-client)),
+then run the desktop app or the `hermes` CLI as yourself.
+
 ## Quick start (development, single machine)
 
 Four terminals from the workspace root:
