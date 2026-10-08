@@ -12,9 +12,9 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-authors = ["Hermes Contributors"]
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourname/hermes"
+authors = ["admiraly"]
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/admiraly/hermes-vpn"
 rust-version = "1.85"
 
 [workspace.dependencies]

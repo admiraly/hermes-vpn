@@ -47,6 +47,7 @@
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       }
-    }
+    },
+    "copyright": "Copyright © 2026 admiraly. PolyForm Noncommercial 1.0.0."
   }
 }

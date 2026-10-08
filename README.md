@@ -1,6 +1,6 @@
 # Hermes
 
-> A virtual LAN for the modern era. Like Hamachi, but open, self-hostable,
+> A virtual LAN for the modern era. Like Hamachi, but source-available, self-hostable,
 > and with first-class broadcast/multicast support — everything that used
 > to Just Work™ on a real LAN works again.
 
@@ -136,4 +136,21 @@ runs the namespace smoke test. Open work and the roadmap live in
 
 ## License
 
-Dual-licensed under MIT OR Apache-2.0.
+Copyright © 2026 admiraly. All rights not granted by the license are
+reserved.
+
+Hermes is **source-available** under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md):
+
+- **Free** for personal use, hobby projects, study and research, and for
+  noncommercial organizations (charities, schools, public-research and
+  government institutions) — including modifying it and sharing it under
+  the same terms.
+- **Commercial use requires a separate license** from the copyright
+  holder. That includes using Hermes in or for a business, selling it,
+  or offering it (or a modified version) as a paid service. To ask for
+  one, [open an issue](https://github.com/admiraly/hermes-vpn/issues) or
+  contact [@admiraly](https://github.com/admiraly).
+
+This is not an OSI-approved open-source license. Contributions are welcome
+under the terms in [CONTRIBUTING.md](CONTRIBUTING.md).
