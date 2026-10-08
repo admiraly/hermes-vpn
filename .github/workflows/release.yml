@@ -1,7 +1,8 @@
 name: Release
 
-# Push a tag like v0.2.0 (or run manually) to build every artifact and
-# publish a GitHub Release. Tags containing a '-' (v0.3.0-alpha.1) are
+# Push a tag like v0.2.0 — or run it manually with a tag name, which then
+# creates the tag at the commit the run was started on — to build every
+# artifact and publish a GitHub Release. Tags containing a '-' (v0.3.0-alpha.1) are
 # marked as pre-releases.
 on:
   push:
@@ -9,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build and publish, e.g. v0.2.0"
+        description: "Tag to publish, e.g. v0.2.0 (created at the run's commit if it doesn't exist)"
         required: true
 
 permissions:
@@ -27,9 +28,9 @@ jobs:
     # Oldest supported runner = widest glibc compatibility for the binaries.
     runs-on: ubuntu-22.04
     steps:
+      # A tag push checks out the tag; a manual run builds the commit it was
+      # started on (and the publish step creates the tag there).
       - uses: actions/checkout@v5
-        with:
-          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v5
@@ -76,9 +77,9 @@ jobs:
     name: windows x86_64
     runs-on: windows-latest
     steps:
+      # A tag push checks out the tag; a manual run builds the commit it was
+      # started on (and the publish step creates the tag there).
       - uses: actions/checkout@v5
-        with:
-          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v5
@@ -142,6 +143,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
           name: Hermes ${{ env.TAG }}
           prerelease: ${{ contains(env.TAG, '-') }}
           generate_release_notes: true
