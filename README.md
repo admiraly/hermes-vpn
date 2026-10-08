@@ -77,8 +77,9 @@ cargo run -p hermes-signaling
 cargo run -p hermes-relay
 
 # 3. Daemon — needs privileges for the virtual adapter
-#    Linux:
-sudo -E cargo run -p hermes-daemon
+#    Linux: give the binary CAP_NET_ADMIN and run it as yourself
+cargo build -p hermes-daemon
+sudo setcap cap_net_admin=+ep target/debug/hermes-daemon && target/debug/hermes-daemon
 #    Windows: run from an elevated prompt
 cargo run -p hermes-daemon
 

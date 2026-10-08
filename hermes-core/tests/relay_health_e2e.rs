@@ -12,7 +12,7 @@ use tokio::time::timeout;
 
 use hermes_core::broadcast::MacRouter;
 use hermes_core::crypto::{NodeSecret, VirtualMac};
-use hermes_core::mesh::Mesh;
+use hermes_core::mesh::{is_transient_recv_error, Mesh};
 use hermes_core::relay::{protocol, spawn_registration, RegistrationConfig, RelayPacket};
 use hermes_core::room::RoomId;
 
@@ -78,7 +78,12 @@ async fn relay_health_flips_on_silence_and_recovers() {
         let socket = socket.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+            loop {
+                let (len, from) = match socket.recv_from(&mut buf).await {
+                    Ok(r) => r,
+                    Err(e) if is_transient_recv_error(&e) => continue,
+                    Err(_) => break,
+                };
                 let _ = mesh.dispatch_inbound(from, &buf[..len]).await;
             }
         });

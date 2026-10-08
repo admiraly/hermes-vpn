@@ -55,7 +55,17 @@ impl TunTapAdapter {
             .mtu(i32::from(config.mtu))
             .up()
             .try_build()
-            .map_err(|e| HermesError::Tap(format!("tokio-tun build: {e}")))?;
+            .map_err(|e| {
+                let hint = if e.to_string().contains("Permission denied")
+                    || e.to_string().contains("Operation not permitted")
+                {
+                    " — the daemon needs CAP_NET_ADMIN (setcap, or the systemd unit) \
+                     and read/write access to /dev/net/tun (normally mode 0666)"
+                } else {
+                    ""
+                };
+                HermesError::Tap(format!("creating the TAP adapter: {e}{hint}"))
+            })?;
         let tun = Arc::new(tun);
 
         // The kernel gives a fresh TAP device a random MAC, but peers

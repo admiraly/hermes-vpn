@@ -48,8 +48,9 @@ time — clients reconnect/re-register automatically.
 | OS | Daemon data dir | Daemon IPC socket |
 |---|---|---|
 | Linux (run as your user) | `~/.local/share/Hermes/` | `$XDG_RUNTIME_DIR/hermes/daemon.sock` |
-| Linux (run via `sudo`) | `/root/.local/share/Hermes/` | `/run/user/0/hermes/...` (⚠ see [§5a](#5a-linux-client)) |
-| Windows | `%APPDATA%\hermes\Hermes\data\` | `\\.\pipe\hermes-daemon` |
+| Linux (system service) | `/var/lib/hermes/` | `/run/hermes/daemon.sock` (group `hermes`) |
+| Windows (by hand) | `%APPDATA%\hermes\Hermes\data\` | `\\.\pipe\hermes-daemon` |
+| Windows (service) | `%ProgramData%\Hermes\` | `\\.\pipe\hermes-daemon` |
 
 ---
 
@@ -243,42 +244,58 @@ adapter) and the **UI** (runs as you). Start the daemon first.
 
 ### 5a. Linux client
 
-The daemon needs `CAP_NET_ADMIN`. **Use `setcap`, not `sudo`** — that way
-the daemon runs as *your* user and shares your `$XDG_RUNTIME_DIR`, so the
-UI can find its socket. (Running via `sudo` puts the socket under root's
-runtime dir and the UI won't connect.)
+**Recommended — install as a system service.** The daemon then runs at
+boot as the unprivileged `hermes` user with only `CAP_NET_ADMIN`, and any
+user in the `hermes` group can drive it from the app or CLI:
 
 ```sh
-# One-time: ensure the TUN module is available
+cargo build --release -p hermes-daemon -p hermes-cli
+sudo packaging/linux/install.sh          # adds you to the 'hermes' group
+# log out and back in (group membership), then:
+hermes status
+```
+
+`install.sh` installs the binaries to `/usr/local/bin`, creates the
+`hermes` user and group, loads the `tun` module (now and at boot), and
+enables [`hermes-daemon.service`](../packaging/linux/hermes-daemon.service).
+The service keeps its identity in `/var/lib/hermes` and listens on
+`/run/hermes/daemon.sock` (mode 0660, group `hermes`). Logs:
+`journalctl -u hermes-daemon`. Remove with
+`sudo packaging/linux/install.sh --uninstall`.
+
+**Alternative — run it by hand as your user** (development). Give the
+binary the capability instead of using `sudo`, so the daemon runs as you
+and the UI finds its per-user socket:
+
+```sh
 sudo modprobe tun
-
-# Grant the capability to the daemon binary (re-run after each rebuild)
-sudo setcap cap_net_admin=+ep target/release/hermes-daemon
-
-# Start the daemon as your normal user
+sudo setcap cap_net_admin=+ep target/release/hermes-daemon   # re-run after each rebuild
 ./target/release/hermes-daemon
 ```
 
-Then launch the UI (the AppImage/.deb you built, or `npx tauri dev`) **as
-the same user**. It connects to the daemon automatically.
+Then launch the UI (the AppImage/.deb you built, or `npx tauri dev`). It
+finds the daemon automatically — the per-user socket first, then the
+system service's.
 
 ### 5b. Windows client
 
 1. **Get `wintun.dll`**: download from <https://www.wintun.net>, take the
    `amd64` build, and place `wintun.dll` **next to `hermes-daemon.exe`**.
 
-2. **Run the daemon as Administrator** (it must create the wintun adapter):
-   right-click `hermes-daemon.exe` → *Run as administrator*, or from an
-   elevated PowerShell:
+2. **Install the daemon as a service** (recommended). From an elevated
+   PowerShell, in the folder holding `hermes-daemon.exe` and `wintun.dll`:
    ```powershell
-   .\hermes-daemon.exe
+   .\hermes-daemon.exe service install
    ```
+   It starts now and at every boot (as LocalSystem), keeps its state in
+   `%ProgramData%\Hermes` and logs to `%ProgramData%\Hermes\daemon.log`.
+   Remove it with `.\hermes-daemon.exe service uninstall`.
 
-3. **Run the UI.** Install/launch the Tauri app you built.
-   > ⚠ If the UI shows "Cannot reach the Hermes daemon", run the UI **as
-   > Administrator too** — a non-elevated app may be unable to open the
-   > elevated daemon's named pipe. Running both elevated is the simple fix
-   > until a service installer lands.
+   *Alternatively*, run it by hand: right-click `hermes-daemon.exe` →
+   *Run as administrator*.
+
+3. **Run the UI or CLI normally — no elevation needed.** The daemon's pipe
+   admits logged-in local users and refuses network clients.
 
 ---
 
@@ -338,7 +355,7 @@ connected.
 |---|---|
 | `curl …/health` fails | Signaling not running or firewall closed (`8787/tcp`). |
 | Client won't connect to signaling | Wrong address (needs `…/v1`), or `wss://` vs `ws://` mismatch with your proxy. |
-| UI: "Cannot reach the Hermes daemon" | Daemon not started; on Linux you used `sudo` (socket under root — use `setcap` instead); on Windows run the UI elevated. |
+| UI: "Cannot reach the Hermes daemon" | Daemon not running (`systemctl status hermes-daemon` / Windows *Services*). Linux service: are you in the `hermes` group (`id`) and did you log in again after install.sh? By hand: started with `sudo`? (use `setcap` instead). |
 | Windows daemon fails to start | `wintun.dll` missing next to the exe, or not running as Administrator. |
 | Linux daemon: "operation not permitted" | Missing `CAP_NET_ADMIN` (`setcap …`) or `tun` module not loaded (`modprobe tun`). |
 | Relayed room never connects | Relay unreachable: `8788/**udp**` closed, or wrong `host:port` (no scheme). |

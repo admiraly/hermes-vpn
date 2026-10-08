@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -26,7 +27,7 @@ jobs:
       # dependencies, so this only gates the workspace.
       RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,16 +62,16 @@ jobs:
     name: smoke (linux netns, real TAP)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --exclude hermes-ui --locked
-      - name: Smoke test (relayed, p2p, fallback, signaling restart)
+      - name: Smoke test (relayed, p2p, fallback, signaling restart, system service)
         run: |
           sudo modprobe tun || true
-          for mode in relayed p2p fallback restart; do
+          for mode in relayed p2p fallback restart service; do
             sudo scripts/netns-smoke.sh "$mode" || exit 1
           done
       - name: Logs on failure
@@ -83,8 +84,8 @@ jobs:
     name: frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -103,8 +104,8 @@ jobs:
     name: tauri (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm

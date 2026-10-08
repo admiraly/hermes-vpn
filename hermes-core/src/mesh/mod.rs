@@ -36,7 +36,7 @@ use crate::nat::{ice, stun};
 use crate::relay::{self, RelayHealth, RelayPacket};
 use crate::tunnel::{PeerPath, PeerTunnel};
 
-pub use driver::{spawn as spawn_driver, DriverHandle};
+pub use driver::{is_transient_recv_error, spawn as spawn_driver, DriverHandle};
 
 /// A live snapshot of one peer's tunnel — the running counters and the
 /// path currently in use. Surfaced through the daemon so a UI can show

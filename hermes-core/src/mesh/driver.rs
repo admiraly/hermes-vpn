@@ -168,6 +168,9 @@ async fn udp_to_tap_loop(
                             Err(e) => debug!(?e, "inbound dispatch error"),
                         }
                     }
+                    Err(e) if is_transient_recv_error(&e) => {
+                        debug!(?e, "transient recv_from error — continuing");
+                    }
                     Err(e) => {
                         warn!(?e, "recv_from failed; exiting udp loop");
                         break;
@@ -177,6 +180,20 @@ async fn udp_to_tap_loop(
         }
     }
     info!("udp→mesh→tap loop exited");
+}
+
+/// Errors a UDP `recv_from` can return that say nothing about the socket
+/// itself. Windows reports an ICMP "port unreachable" for an *earlier*
+/// send (say, a probe to a dead NAT candidate — routine in hole punching)
+/// as `WSAECONNRESET` on the *next* receive; treating that as fatal would
+/// silently kill all inbound traffic. The following datagram reads fine.
+pub fn is_transient_recv_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::Interrupted
+    )
 }
 
 /// Decide what to do with an Ethernet frame decrypted from the mesh.

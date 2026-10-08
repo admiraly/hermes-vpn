@@ -47,9 +47,11 @@ impl AppState {
                 Ok(arc)
             }
             Err(e) => Err(format!(
-                "Cannot reach the Hermes daemon. Make sure `hermes-daemon` \
-                 is running (Linux: `sudo hermes-daemon`; Windows: run as \
-                 Administrator). Details: {e}"
+                "Cannot reach the Hermes daemon. Start it as a service \
+                 (Linux: `sudo packaging/linux/install.sh`, then log in \
+                 again so you're in the `hermes` group; Windows: \
+                 `hermes-daemon.exe service install` from an elevated \
+                 prompt) or run `hermes-daemon` by hand. Details: {e}"
             )),
         }
     }

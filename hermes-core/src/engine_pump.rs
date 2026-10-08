@@ -230,6 +230,15 @@ pub(crate) fn spawn(state: Arc<PumpState>, mut inbox: mpsc::Receiver<ServerMessa
         while let Some(msg) = inbox.recv().await {
             if let Err(e) = handle_message(&state, msg).await {
                 warn!(?e, "pump handler error");
+                // Don't fail silently: clients waiting on an outcome (the
+                // CLI's `create`/`join`, the UI) need to hear about it.
+                let _ = state
+                    .events
+                    .send(EngineEvent::SignalingError {
+                        code: "engine_error".into(),
+                        message: e.to_string(),
+                    })
+                    .await;
             }
         }
         info!("engine event pump exited");
@@ -250,17 +259,19 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             mode,
             relay_addr,
         } => {
-            // Remember the code (even if room entry fails below) so an
-            // automatic reconnect can re-join.
+            // Remember the code so an automatic reconnect can re-join.
             *state.invite.write() = Some(invite_code);
-            enter_room(
+            if let Err(e) = enter_room(
                 state,
                 room_id,
                 format!("room-{}", &invite_code.to_string()[..4]),
                 mode,
                 relay_addr.clone(),
             )
-            .await?;
+            .await
+            {
+                return abandon_room(state, &e).await;
+            }
             let _ = state
                 .events
                 .send(EngineEvent::RoomEntered {
@@ -278,14 +289,17 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             mode,
             relay_addr,
         } => {
-            enter_room(
+            if let Err(e) = enter_room(
                 state,
                 room_id,
                 format!("room-{}", &room_id.to_string()[..8]),
                 mode,
                 relay_addr.clone(),
             )
-            .await?;
+            .await
+            {
+                return abandon_room(state, &e).await;
+            }
             let _ = state
                 .events
                 .send(EngineEvent::RoomEntered {
@@ -350,6 +364,25 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             Ok(())
         }
     }
+}
+
+/// The server placed us in a room but we couldn't set it up locally
+/// (typically: no permission to create the virtual adapter). Tell the
+/// server we're not there — otherwise peers would wait on us forever —
+/// stop auto re-joining it, and report why.
+async fn abandon_room(state: &Arc<PumpState>, error: &HermesError) -> Result<()> {
+    warn!(?error, "could not enter room — leaving it");
+    *state.invite.write() = None;
+    tear_down_room(&state.room_rt, Some(&state.mesh)).await;
+    let _ = state.signaling.send(ClientMessage::LeaveRoom).await;
+    let _ = state
+        .events
+        .send(EngineEvent::SignalingError {
+            code: "room_failed".into(),
+            message: format!("could not enter the room: {error}"),
+        })
+        .await;
+    Ok(())
 }
 
 /// Create/replace the current room, bring up the virtual adapter, spawn

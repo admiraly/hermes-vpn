@@ -48,7 +48,45 @@ where
     Framed::new(stream, codec())
 }
 
-/// Return the canonical Unix domain socket path for the daemon.
+/// Socket of a daemon running as a system service (`hermes-daemon
+/// --system`, e.g. via the bundled systemd unit). Group-accessible: users
+/// in the `hermes` group may drive it.
+#[cfg(unix)]
+pub const SYSTEM_SOCKET: &str = "/run/hermes/daemon.sock";
+
+/// Environment variable overriding the socket path on both sides.
+#[cfg(unix)]
+pub const SOCKET_ENV: &str = "HERMES_SOCKET";
+
+/// Where a daemon should listen: `$HERMES_SOCKET` if set, else the system
+/// socket in `--system` mode, else the per-user socket.
+#[cfg(unix)]
+#[must_use]
+pub fn listen_path(system: bool) -> PathBuf {
+    if let Some(p) = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if system {
+        PathBuf::from(SYSTEM_SOCKET)
+    } else {
+        unix_socket_path()
+    }
+}
+
+/// Where a client should look, in order: `$HERMES_SOCKET`, the per-user
+/// daemon's socket, then the system service's socket.
+#[cfg(unix)]
+#[must_use]
+pub fn client_paths() -> Vec<PathBuf> {
+    if let Some(p) = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()) {
+        return vec![PathBuf::from(p)];
+    }
+    let mut paths = vec![unix_socket_path(), PathBuf::from(SYSTEM_SOCKET)];
+    paths.dedup();
+    paths
+}
+
+/// The per-user Unix domain socket path.
 ///
 /// Prefers `$XDG_RUNTIME_DIR/hermes/daemon.sock` (cleared on logout) and
 /// falls back to the user's data dir if the runtime dir is unavailable.
@@ -64,6 +102,67 @@ pub fn unix_socket_path() -> PathBuf {
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     data.join("daemon.sock")
+}
+
+/// Who may open the daemon's pipe, as an SDDL string: full control for
+/// SYSTEM and Administrators, read/write for authenticated users (so a
+/// non-elevated UI can drive an elevated daemon or the service). The `P`
+/// flag stops inherited ACEs from widening it. Remote (SMB) clients are
+/// refused separately, via `reject_remote_clients`.
+#[cfg(windows)]
+pub const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+
+/// Create one instance of the daemon's named pipe with [`PIPE_SDDL`].
+///
+/// `first` must be `true` for the very first instance: Windows then fails
+/// if the name already exists, so another process can't squat the pipe
+/// name ahead of the daemon and impersonate it to clients.
+///
+/// # Errors
+/// Fails if the security descriptor can't be built or the pipe can't be
+/// created (e.g. another daemon already owns the name).
+#[cfg(windows)]
+pub fn create_pipe_instance(
+    first: bool,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+    const SDDL_REVISION_1: u32 = 1;
+
+    let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is a NUL-terminated UTF-16 string that outlives the
+    // call; `descriptor` receives a LocalAlloc'd buffer we free below.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut attrs = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let mut opts = tokio::net::windows::named_pipe::ServerOptions::new();
+    opts.first_pipe_instance(first).reject_remote_clients(true);
+    // SAFETY: `attrs` points at a valid SECURITY_ATTRIBUTES whose
+    // descriptor stays alive until after the call returns.
+    let result = unsafe {
+        opts.create_with_security_attributes_raw(PIPE_PATH, std::ptr::from_mut(&mut attrs).cast())
+    };
+    // SAFETY: `descriptor` was allocated by the conversion call above.
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result
 }
 
 /// Stub to keep the path function cross-platform where callers need one.

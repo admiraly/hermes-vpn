@@ -50,11 +50,16 @@ impl DaemonClient {
     /// or the daemon speaks a different protocol version.
     #[cfg(unix)]
     pub async fn connect_default() -> anyhow::Result<Self> {
-        let path = transport::unix_socket_path();
-        let stream = tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("connect {}: {e}", path.display()))?;
-        Self::from_stream(stream).await
+        // A per-user daemon, else the system service (see
+        // `transport::client_paths`). Report every attempt on failure.
+        let mut errors = Vec::new();
+        for path in transport::client_paths() {
+            match tokio::net::UnixStream::connect(&path).await {
+                Ok(stream) => return Self::from_stream(stream).await,
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        anyhow::bail!("no daemon socket reachable ({})", errors.join("; "))
     }
 
     /// Connect to the daemon via the Windows named pipe.
@@ -64,7 +69,20 @@ impl DaemonClient {
     #[cfg(windows)]
     pub async fn connect_default() -> anyhow::Result<Self> {
         use tokio::net::windows::named_pipe::ClientOptions;
-        let stream = ClientOptions::new().open(transport::PIPE_PATH)?;
+        // ERROR_PIPE_BUSY: every instance is mid-handshake with another
+        // client; the daemon creates the next one right away, so retry.
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let mut attempts = 0;
+        let stream = loop {
+            match ClientOptions::new().open(transport::PIPE_PATH) {
+                Ok(s) => break s,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 20 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => anyhow::bail!("open {}: {e}", transport::PIPE_PATH),
+            }
+        };
         Self::from_stream(stream).await
     }
 

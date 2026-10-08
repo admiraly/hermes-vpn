@@ -10,6 +10,10 @@
 #   scripts/netns-smoke.sh p2p         # direct path
 #   scripts/netns-smoke.sh fallback    # direct path firewalled → relay fallback
 #   scripts/netns-smoke.sh restart     # p2p room survives a signaling restart
+#   scripts/netns-smoke.sh service     # node A runs like the systemd unit: as the
+#                                      # unprivileged `hermes` user with only
+#                                      # CAP_NET_ADMIN, driven by another user
+#                                      # through the group-shared system socket
 #   scripts/netns-smoke.sh clean       # tear everything down
 #
 # Needs: iproute2, iputils-ping, iptables (fallback mode).
@@ -26,6 +30,8 @@ cleanup() {
   pkill -f "^$BIN/hermes-signaling" 2>/dev/null
   iptables -D FORWARD -s 10.200.1.0/24 -d 10.200.2.0/24 -j DROP 2>/dev/null
   iptables -D FORWARD -s 10.200.2.0/24 -d 10.200.1.0/24 -j DROP 2>/dev/null
+  while iptables -D FORWARD -s 10.200.0.0/16 -d 10.200.0.0/16 -j ACCEPT 2>/dev/null; do :; done
+  rm -rf /run/hermes
   for n in a b; do
     ip link del veth-$n 2>/dev/null
     ip netns del hermes-$n 2>/dev/null
@@ -42,6 +48,9 @@ cleanup
 
 # --- topology -------------------------------------------------------------
 sysctl -qw net.ipv4.ip_forward=1
+# Hosts with Docker (e.g. GitHub's runners) default FORWARD to DROP; allow
+# our own A<->B traffic explicitly (fallback mode inserts DROPs above this).
+iptables -I FORWARD -s 10.200.0.0/16 -d 10.200.0.0/16 -j ACCEPT 2>/dev/null || true
 i=1
 for n in a b; do
   ip netns add hermes-$n
@@ -73,7 +82,39 @@ start_signaling
 HERMES_RELAY_BIND=${RELAY_BIND:-0.0.0.0:8788} "$BIN/hermes-relay" >"$WORK/relay.log" 2>&1 &
 sleep 0.5
 run() { local n=$1; shift; ip netns exec hermes-$n env HOME="$WORK/$n" XDG_RUNTIME_DIR=/run/hermes-smoke-$n "$@"; }
-run a "$BIN/hermes-daemon" >"$WORK/daemon-a.log" 2>&1 &
+if [ "$MODE" = service ]; then
+  # Mirror packaging/linux/hermes-daemon.service: system user `hermes`,
+  # RuntimeDirectory=/run/hermes (0750), StateDirectory, ambient
+  # CAP_NET_ADMIN only. The CLI runs as `hermes-smoke-user`, a plain user
+  # whose only privilege is membership in the `hermes` group.
+  getent group hermes >/dev/null || groupadd --system hermes
+  id -u hermes >/dev/null 2>&1 || useradd --system --gid hermes --no-create-home --shell /usr/sbin/nologin hermes
+  id -u hermes-smoke-user >/dev/null 2>&1 || useradd --no-create-home --shell /bin/sh hermes-smoke-user
+  usermod -aG hermes hermes-smoke-user
+  install -d -o hermes -g hermes -m 0750 /run/hermes
+  # Distros ship /dev/net/tun as 0666 (udev); some containers make it 0600,
+  # which only root could open.
+  chmod 0666 /dev/net/tun
+  install -d -o hermes -g hermes -m 0700 "$WORK/a-state"
+  chmod o+rx "$WORK" "$BIN" 2>/dev/null || true
+  ip netns exec hermes-a env STATE_DIRECTORY="$WORK/a-state" \
+    setpriv --reuid hermes --regid hermes --init-groups \
+      --inh-caps +net_admin --ambient-caps +net_admin --bounding-set -all,+net_admin \
+      "$BIN/hermes-daemon" --system >"$WORK/daemon-a.log" 2>&1 &
+  # Node A's CLI: an ordinary group member, no env overrides — it must
+  # find the system socket on its own.
+  run() {
+    local n=$1; shift
+    if [ "$n" = a ]; then
+      ip netns exec hermes-a setpriv --reuid hermes-smoke-user --regid hermes-smoke-user --init-groups \
+        env -i PATH=/usr/bin:/bin HOME=/nonexistent "$@"
+    else
+      ip netns exec hermes-$n env HOME="$WORK/$n" XDG_RUNTIME_DIR=/run/hermes-smoke-$n "$@"
+    fi
+  }
+else
+  run a "$BIN/hermes-daemon" >"$WORK/daemon-a.log" 2>&1 &
+fi
 run b "$BIN/hermes-daemon" >"$WORK/daemon-b.log" 2>&1 &
 sleep 1
 
@@ -83,7 +124,7 @@ for n in a b; do run $n "$BIN/hermes" use-signaling main >/dev/null; run $n "$BI
 
 case $MODE in
   relayed) ARGS=(--mode relayed --relay $RELAY); WANT=relayed ;;
-  p2p | restart) ARGS=(--mode p2p); WANT=direct ;;
+  p2p | restart | service) ARGS=(--mode p2p); WANT=direct ;;
   fallback) ARGS=(--mode p2p --relay $RELAY); WANT=relayed ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac
@@ -104,6 +145,17 @@ FAIL=0
 ip netns exec hermes-a ping -c 3 -W 2 "$PEER_IP" >/dev/null || FAIL=1
 ip netns exec hermes-a ping -c 2 -W 2 -s 1300 -M do "$PEER_IP" >/dev/null || FAIL=1
 run a "$BIN/hermes" status | grep -q " $WANT " || FAIL=1
+if [ "$MODE" = service ] && [ $FAIL = 0 ]; then
+  # The service's socket admits the group, and nobody else.
+  [ "$(stat -c '%a %G' /run/hermes/daemon.sock)" = "660 hermes" ] || { echo "socket perms: $(stat -c '%a %G' /run/hermes/daemon.sock)"; FAIL=1; }
+  id -u hermes-smoke-outsider >/dev/null 2>&1 || useradd --no-create-home --shell /bin/sh hermes-smoke-outsider
+  if setpriv --reuid hermes-smoke-outsider --regid hermes-smoke-outsider --init-groups \
+      env -i HOME=/nonexistent "$BIN/hermes" status >/dev/null 2>&1; then
+    echo "a user outside the hermes group could drive the daemon"; FAIL=1
+  fi
+  # State went to the service's state directory, owned by the service user.
+  [ "$(stat -c %U "$WORK/a-state/identity.key" 2>/dev/null)" = hermes ] || { echo "identity not in StateDirectory"; FAIL=1; }
+fi
 if [ "$MODE" = restart ] && [ $FAIL = 0 ]; then
   # Kill signaling: rooms vanish from its memory. Both daemons must
   # reconnect, restore the same room, and keep their live tunnel.

@@ -1,0 +1,49 @@
+# Hermes daemon as a system service.
+#
+# Runs as the unprivileged `hermes` user with exactly one capability,
+# CAP_NET_ADMIN (to create and configure the TAP adapter). Clients reach
+# it through /run/hermes/daemon.sock, which is readable and writable by
+# the `hermes` group: add a user to that group to let them use Hermes.
+#
+# Installed by packaging/linux/install.sh.
+
+[Unit]
+Description=Hermes virtual LAN daemon
+Documentation=https://github.com/admiraly/hermes-vpn
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+ExecStart=/usr/local/bin/hermes-daemon --system
+Restart=on-failure
+RestartSec=2
+
+# /run/hermes (socket) and /var/lib/hermes (identity, server directory).
+RuntimeDirectory=hermes
+RuntimeDirectoryMode=0750
+StateDirectory=hermes
+StateDirectoryMode=0700
+
+# Privileges: CAP_NET_ADMIN only, inherited by the `ip` helper it runs.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Sandboxing.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

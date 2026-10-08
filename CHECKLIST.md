@@ -125,19 +125,24 @@ Improvements added:
       the daemon, Unix-socket IPC and TAP adapter for real.
 - [ ] **Bundle `wintun.dll`** with the Windows build/installer (must sit
       next to `hermes-daemon.exe`); document or automate the copy.
-- [ ] **Daemon lifecycle / service install.** Today the daemon is launched
-      by hand. Decide: Tauri sidecar that spawns it elevated, a Windows
-      service + systemd unit, or a one-click installer. Wire it up. Two
-      deployment gotchas to solve as part of this (documented in
-      [DEPLOYMENT.md](docs/DEPLOYMENT.md) §5/§8):
-      - **Linux:** running the daemon via `sudo` puts its IPC socket under
-        root's `$XDG_RUNTIME_DIR`, so a UI running as the user can't find
-        it. Workaround is `setcap` (run as user); a service should expose a
-        well-known socket path both can agree on.
-      - **Windows:** a non-elevated UI may be unable to open the elevated
-        daemon's named pipe (default pipe ACL). Workaround is running the
-        UI elevated too; the fix is a permissive-but-safe pipe security
-        descriptor (or a proper service + client identity check).
+- [x] **Daemon lifecycle / service install.**
+      - **Linux:** `packaging/linux/install.sh` installs a hardened systemd
+        unit: the daemon runs as the unprivileged `hermes` user with only
+        `CAP_NET_ADMIN`, state in `/var/lib/hermes`, socket
+        `/run/hermes/daemon.sock` (0660, group `hermes` — group membership
+        is the authorization). Clients try `$HERMES_SOCKET`, the per-user
+        socket, then the system socket. Verified for real by the netns
+        smoke test's `service` mode (also in CI), including that a user
+        outside the group is refused.
+      - **Windows:** `hermes-daemon service install|uninstall` registers an
+        auto-start LocalSystem service (state + log in
+        `%ProgramData%\Hermes`). The pipe now has an explicit ACL
+        (SYSTEM/Admins full, authenticated users read/write), refuses
+        remote clients, and claims its name exclusively on the first
+        instance (no pipe squatting). Compiles and builds in CI; **not yet
+        run on a real Windows machine.**
+      - Still open: a one-click installer (MSI/NSIS) wrapping this, and the
+        Tauri app offering to install the service.
 - [ ] **Real app icons & branding** — replace the generated placeholder
       [icons](hermes-ui/src-tauri/icons) with real artwork; add `.icns` if
       macOS is ever targeted.

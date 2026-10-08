@@ -17,7 +17,7 @@ use tokio::time::timeout;
 
 use hermes_core::broadcast::MacRouter;
 use hermes_core::crypto::{NodeSecret, VirtualIpv4, VirtualMac};
-use hermes_core::mesh::Mesh;
+use hermes_core::mesh::{is_transient_recv_error, Mesh};
 use hermes_core::nat::ice;
 use hermes_core::tunnel::{PeerPath, PeerTunnel};
 
@@ -40,7 +40,13 @@ async fn node() -> Node {
         let mesh = mesh.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+            loop {
+                let (n, from) = match socket.recv_from(&mut buf).await {
+                    Ok(r) => r,
+                    // Same rule as the driver (Windows ICMP resets).
+                    Err(e) if is_transient_recv_error(&e) => continue,
+                    Err(_) => break,
+                };
                 if let Ok(Some(frame)) = mesh.dispatch_inbound(from, &buf[..n]).await {
                     let _ = tx.send(frame);
                 }
