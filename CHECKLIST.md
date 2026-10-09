@@ -322,8 +322,16 @@ Improvements added:
       the real signaling binary — one posing as Linux, one as Windows — and
       checks unicast both ways, ARP answered by the shim, and broadcast,
       without privileges, on every CI platform.
-- [ ] **Frame-parser fuzzing** for the relay protocol, framing, ARP, and
-      classifier parsers.
+- [x] **Parser robustness** (`hermes-core/tests/parsers_proptest.rs`,
+      property-based, runs on stable in CI): the relay protocol, tunnel
+      framing, ARP, MAC classifier, wintun shim, STUN, ICE probes, signaling
+      JSON and invite codes never panic on arbitrary or packet-shaped bytes
+      and round-trip; any bit-flip of a relay REGISTER fails verification;
+      and arbitrary datagrams from arbitrary addresses fed into a live mesh
+      with a real tunnel never decrypt into a frame. A 150 000-cases-per-
+      property run (`PROPTEST_CASES=150000`, ~2 M inputs) found nothing.
+      Still open: coverage-guided fuzzing (`cargo-fuzz`, needs nightly) of
+      the same parsers and of boringtun's handshake path.
 - [x] **P2P ICE path test** — `hermes-core/tests/p2p_e2e.rs`: two meshes
       probe each other, build direct tunnels, carry unicast + broadcast
       frames; plus roaming, spoofing and STUN-through-demux tests.
