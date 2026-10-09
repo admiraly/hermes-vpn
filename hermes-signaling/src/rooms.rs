@@ -190,6 +190,12 @@ impl RoomRegistry {
         self.by_id.get(&id).map(|room| room.clone())
     }
 
+    /// Number of rooms currently tracked.
+    #[must_use]
+    pub fn room_count(&self) -> usize {
+        self.by_id.len()
+    }
+
     /// Remove a room if it has no members left.
     pub fn remove_if_empty(&self, room: &ServerRoom) {
         if room.members.read().is_empty() {

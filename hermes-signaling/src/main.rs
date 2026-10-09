@@ -8,6 +8,7 @@
 mod limits;
 mod rooms;
 mod session;
+mod stats;
 
 use std::net::SocketAddr;
 
@@ -26,6 +27,8 @@ pub struct AppState {
     pub registry: RoomRegistry,
     /// Per-IP abuse limits.
     pub limits: Limits,
+    /// Counters for `/metrics`.
+    pub stats: stats::SharedStats,
 }
 
 #[tokio::main]
@@ -42,6 +45,26 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         registry: RoomRegistry::new(),
         limits: Limits::from_env(),
+        stats: Default::default(),
+    };
+    // Optional metrics endpoint, off unless asked for (bind to localhost or
+    // an internal interface).
+    let _metrics = match hermes_core::metrics::bind_from_env("HERMES_SIGNALING_METRICS_BIND")? {
+        Some(addr) => {
+            let (registry, stats, started) = (
+                state.registry.clone(),
+                state.stats.clone(),
+                std::time::Instant::now(),
+            );
+            let (bound, task) = hermes_core::metrics::serve(
+                addr,
+                std::sync::Arc::new(move || stats.render(&registry, started)),
+            )
+            .await?;
+            info!(%bound, "metrics at /metrics");
+            Some(task)
+        }
+        None => None,
     };
     {
         let limits = state.limits.clone();

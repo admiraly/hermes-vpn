@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use hermes_core::crypto::NodeId;
+use hermes_core::metrics::{self, Exposition};
 use hermes_core::ratelimit::{Rate, RateLimiter};
 use hermes_core::relay::protocol::{self, RelayPacket};
 use hermes_core::room::RoomId;
@@ -109,6 +110,27 @@ impl Limits {
     }
 }
 
+/// Operational counters, exposed at `/metrics` when `HERMES_RELAY_METRICS_BIND`
+/// is set. All aggregate; nothing identifies a node or an address.
+#[derive(Default)]
+struct Counters {
+    registers_accepted: AtomicU64,
+    registers_bad_signature: AtomicU64,
+    registers_replay: AtomicU64,
+    registers_limited: AtomicU64,
+    packets_forwarded: AtomicU64,
+    bytes_forwarded: AtomicU64,
+    dropped_unregistered_sender: AtomicU64,
+    dropped_queue_full: AtomicU64,
+    packets_queued: AtomicU64,
+    packets_released_from_queue: AtomicU64,
+    sessions_expired: AtomicU64,
+}
+
+fn bump(counter: &AtomicU64) {
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
 /// How long a DATA packet for a not-yet-registered destination is held.
 const PENDING_TTL: Duration = Duration::from_secs(3);
 /// Packets held per destination (enough for a WireGuard handshake
@@ -142,6 +164,8 @@ struct State {
     /// peer's registration, costing a 5 s retransmit.
     pending: DashMap<(RoomId, NodeId), Vec<Pending>>,
     pending_total: AtomicUsize,
+    counters: Counters,
+    started: Instant,
 }
 
 impl Default for State {
@@ -188,7 +212,77 @@ impl State {
             register_limiter: RateLimiter::new(Rate::new(rps, Duration::from_secs(1), rps * 2)),
             pending: DashMap::new(),
             pending_total: AtomicUsize::new(0),
+            counters: Counters::default(),
+            started: Instant::now(),
         }
+    }
+
+    /// Snapshot in Prometheus text format.
+    fn metrics(&self) -> String {
+        let c = &self.counters;
+        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        Exposition::new()
+            .gauge(
+                "hermes_relay_sessions",
+                "Registered (room, node) sessions.",
+                self.sessions.len() as u64,
+            )
+            .gauge(
+                "hermes_relay_pending_packets",
+                "Packets held for destinations that haven't registered.",
+                self.pending_total.load(Ordering::Relaxed) as u64,
+            )
+            .gauge(
+                "hermes_relay_uptime_seconds",
+                "Seconds since start.",
+                self.started.elapsed().as_secs(),
+            )
+            .labeled_counter(
+                "hermes_relay_registers_total",
+                "REGISTER packets by outcome.",
+                "result",
+                &[
+                    ("accepted", get(&c.registers_accepted)),
+                    ("bad_signature", get(&c.registers_bad_signature)),
+                    ("replay", get(&c.registers_replay)),
+                    ("limited", get(&c.registers_limited)),
+                ],
+            )
+            .counter(
+                "hermes_relay_forwarded_packets_total",
+                "DATA packets forwarded.",
+                get(&c.packets_forwarded),
+            )
+            .counter(
+                "hermes_relay_forwarded_bytes_total",
+                "Payload bytes forwarded.",
+                get(&c.bytes_forwarded),
+            )
+            .counter(
+                "hermes_relay_queued_packets_total",
+                "Packets held for a not-yet-registered destination.",
+                get(&c.packets_queued),
+            )
+            .counter(
+                "hermes_relay_released_packets_total",
+                "Held packets delivered after the destination registered.",
+                get(&c.packets_released_from_queue),
+            )
+            .labeled_counter(
+                "hermes_relay_dropped_packets_total",
+                "DATA packets dropped, by reason.",
+                "reason",
+                &[
+                    ("unregistered_sender", get(&c.dropped_unregistered_sender)),
+                    ("queue_full", get(&c.dropped_queue_full)),
+                ],
+            )
+            .counter(
+                "hermes_relay_sessions_expired_total",
+                "Sessions removed after going quiet.",
+                get(&c.sessions_expired),
+            )
+            .finish()
     }
 
     fn ip_count(&self, ip: IpAddr) -> usize {
@@ -299,7 +393,8 @@ impl State {
     /// Decide what to do with a DATA packet from `from` to `dest`.
     fn route(&self, from: SocketAddr, dest: NodeId, payload: &[u8]) -> Routed {
         let Some((room, src)) = self.by_addr.get(&from).map(|k| *k) else {
-            return Routed::Dropped; // unregistered senders can't send
+            bump(&self.counters.dropped_unregistered_sender); // can't send until registered
+            return Routed::Dropped;
         };
         if let Some(target) = self.sessions.get(&(room, dest)) {
             return Routed::Forward {
@@ -310,11 +405,13 @@ impl State {
         }
         // Destination not registered (yet): hold a few packets briefly.
         if self.pending_total.load(Ordering::Relaxed) >= PENDING_TOTAL {
+            bump(&self.counters.dropped_queue_full);
             return Routed::Dropped;
         }
         let mut queue = self.pending.entry((room, dest)).or_default();
         queue.retain(|p| p.queued.elapsed() < PENDING_TTL);
         if queue.len() >= PENDING_PER_DEST {
+            bump(&self.counters.dropped_queue_full);
             return Routed::Dropped;
         }
         queue.push(Pending {
@@ -323,6 +420,7 @@ impl State {
             payload: payload.to_vec(),
         });
         self.pending_total.fetch_add(1, Ordering::Relaxed);
+        bump(&self.counters.packets_queued);
         Routed::Queued
     }
 
@@ -353,6 +451,7 @@ impl State {
             // expired session (the socket may have re-registered since).
             self.by_addr.remove_if(&addr, |_, v| *v == key);
             self.ip_remove(addr.ip());
+            bump(&self.counters.sessions_expired);
             debug!(node = %key.1.short(), "session expired");
         }
         let mut dropped = 0;
@@ -393,6 +492,18 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    // Optional metrics endpoint. Off unless asked for; bind it to localhost
+    // or an internal interface.
+    let _metrics = match metrics::bind_from_env("HERMES_RELAY_METRICS_BIND")? {
+        Some(addr) => {
+            let state = state.clone();
+            let (bound, task) = metrics::serve(addr, Arc::new(move || state.metrics())).await?;
+            info!(%bound, "metrics at /metrics");
+            Some(task)
+        }
+        None => None,
+    };
 
     tokio::select! {
         res = run_listeners(bind, state) => res,
@@ -490,6 +601,7 @@ async fn serve(socket: Arc<UdpSocket>, state: Arc<State>) {
                 signature,
             }) => match state.register(from, &socket, room_id, node_id, timestamp_ms, &signature) {
                 Registration::Accepted => {
+                    bump(&state.counters.registers_accepted);
                     let ack = protocol::encode_register_ack(&room_id);
                     if let Err(e) = socket.send_to(&ack, from).await {
                         debug!(%from, ?e, "ack send failed");
@@ -497,6 +609,7 @@ async fn serve(socket: Arc<UdpSocket>, state: Arc<State>) {
                     // Deliver anything that arrived for this node before it
                     // registered.
                     for p in state.take_pending(room_id, node_id) {
+                        bump(&state.counters.packets_released_from_queue);
                         let fwd = protocol::encode_forward(&p.src, &p.payload);
                         if let Err(e) = socket.send_to(&fwd, from).await {
                             debug!(%from, ?e, "pending forward failed");
@@ -504,20 +617,30 @@ async fn serve(socket: Arc<UdpSocket>, state: Arc<State>) {
                     }
                 }
                 Registration::Limited => {
+                    bump(&state.counters.registers_limited);
                     debug!(%from, "REGISTER over rate or session limit — dropped");
                 }
                 Registration::BadSignature => {
+                    bump(&state.counters.registers_bad_signature);
                     warn!(%from, node = %node_id.short(), "REGISTER with bad signature");
                 }
                 Registration::Replay => {
+                    bump(&state.counters.registers_replay);
                     warn!(%from, node = %node_id.short(), "replayed REGISTER rejected");
                 }
             },
             Some(RelayPacket::Data { dest, payload }) => match state.route(from, dest, payload) {
                 Routed::Forward { target, via, src } => {
                     let fwd = protocol::encode_forward(&src, payload);
-                    if let Err(e) = via.send_to(&fwd, target).await {
-                        debug!(%target, ?e, "forward send failed");
+                    match via.send_to(&fwd, target).await {
+                        Ok(_) => {
+                            bump(&state.counters.packets_forwarded);
+                            state
+                                .counters
+                                .bytes_forwarded
+                                .fetch_add(payload.len() as u64, Ordering::Relaxed);
+                        }
+                        Err(e) => debug!(%target, ?e, "forward send failed"),
                     }
                 }
                 Routed::Queued => {

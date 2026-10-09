@@ -81,6 +81,30 @@ HERMES_RELAY_BIND=0.0.0.0:8788 RUST_LOG=info ./hermes-relay
 Packets for a member that hasn't registered yet are held briefly (up to 4
 per destination, 3 s, 4096 overall) and delivered once it registers.
 
+## Metrics (optional)
+
+Both servers can expose Prometheus metrics. They're **off by default**: set a
+bind address to turn them on, and keep it on localhost or an internal
+interface (the numbers are aggregate — no node ids, addresses or invite
+codes — but there's no reason to publish them).
+
+| Variable | Serves |
+|---|---|
+| `HERMES_SIGNALING_METRICS_BIND=127.0.0.1:9101` | `/metrics`, `/health` for the signaling server |
+| `HERMES_RELAY_METRICS_BIND=127.0.0.1:9102` | `/metrics`, `/health` for the relay |
+
+```sh
+curl -s http://127.0.0.1:9102/metrics
+```
+
+Useful series: `hermes_relay_sessions`, `hermes_relay_forwarded_bytes_total`,
+`hermes_relay_registers_total{result="bad_signature|replay|limited"}`,
+`hermes_relay_dropped_packets_total{reason=…}`, `hermes_signaling_sessions`,
+`hermes_signaling_rooms`, `hermes_signaling_auth_failures_total`,
+`hermes_signaling_room_events_total{kind="invalid_code|rate_limited|…"}`.
+A rising `bad_signature`, `invalid_code` or `rate_limited` count is the
+signature of someone probing the server.
+
 ## systemd units
 
 `/etc/systemd/system/hermes-signaling.service`:

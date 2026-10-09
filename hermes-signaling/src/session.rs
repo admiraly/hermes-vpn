@@ -23,6 +23,7 @@ use hermes_core::signaling::protocol::{ClientMessage, ServerMessage};
 use hermes_core::room::RoomMode;
 
 use crate::rooms::{RoomRegistry, ServerRoom, Session};
+use crate::stats;
 use crate::AppState;
 
 /// Default silence after which a client is considered gone: three missed
@@ -38,9 +39,11 @@ pub async fn ws_handler(
 ) -> Response {
     let ip = app.limits.client_ip(peer, &headers);
     if !app.limits.connections.check(&ip) {
+        stats::bump(&app.stats.connections_rejected_rate);
         debug!(%ip, "connection rate limit hit");
         return (StatusCode::TOO_MANY_REQUESTS, "too many connections").into_response();
     }
+    stats::bump(&app.stats.connections);
     ws.on_upgrade(move |socket| run_session(socket, app, ip))
 }
 
@@ -86,6 +89,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                             .unwrap(),
                         ))
                         .await;
+                    stats::bump(&app.stats.auth_failures);
                     return;
                 }
                 (
@@ -107,12 +111,16 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
         Ok(v) => v,
         Err(e) => {
             warn!(?e, "bad node_id in Hello");
+            stats::bump(&app.stats.auth_failures);
             return;
         }
     };
     let sig = match Signature::from_slice(&signature) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => {
+            stats::bump(&app.stats.auth_failures);
+            return;
+        }
     };
     if verifying.verify(&nonce, &sig).is_err() {
         let _ = ws_tx
@@ -124,6 +132,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 .unwrap(),
             ))
             .await;
+        stats::bump(&app.stats.auth_failures);
         return;
     }
 
@@ -144,10 +153,14 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 .unwrap(),
             ))
             .await;
+        stats::bump(&app.stats.auth_failures);
         return;
     }
 
     // Auth OK. Issue Welcome.
+    app.stats
+        .sessions_active
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let session_id = Uuid::new_v4().to_string();
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<ServerMessage>(64);
     let welcome = ServerMessage::Welcome {
@@ -193,6 +206,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(_) => {
+                stats::bump(&app.stats.idle_disconnects);
                 info!(node = %node_id.short(), "client silent — dropping session");
                 break;
             }
@@ -233,6 +247,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     continue;
                 }
                 if !app.limits.room_ops.check(&ip) {
+                    stats::bump(&app.stats.room_ops_rate_limited);
                     send(&session, rate_limited()).await;
                     continue;
                 }
@@ -240,6 +255,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 if let Some(old) = current_room.take() {
                     leave(&registry, &old, &session).await;
                 }
+                stats::bump(&app.stats.rooms_created);
                 let room = registry.create(name, mode, relay_addr);
                 info!(room = %room.id, name = %room.name, mode = ?room.mode, "room created");
                 room.insert_member(session.clone());
@@ -260,11 +276,13 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 // Every attempt counts, so guessing invite codes is capped
                 // at a few dozen tries per minute per address.
                 if !app.limits.room_ops.check(&ip) {
+                    stats::bump(&app.stats.room_ops_rate_limited);
                     send(&session, rate_limited()).await;
                     continue;
                 }
                 let restoring = restore.is_some();
                 let Some(room) = registry.find_or_restore(&code, restore) else {
+                    stats::bump(&app.stats.join_invalid_code);
                     send(
                         &session,
                         error("invalid_code", "invite code not recognised"),
@@ -272,6 +290,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     .await;
                     continue;
                 };
+                stats::bump(&app.stats.rooms_joined);
                 // Joining another room implicitly leaves the current one;
                 // re-joining the same room is just a refresh.
                 if let Some(old) = current_room.take() {
@@ -280,6 +299,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     }
                 }
                 if restoring && room.members.read().is_empty() {
+                    stats::bump(&app.stats.rooms_restored);
                     info!(room = %room.id, "room restored after server restart");
                 }
 
@@ -362,6 +382,9 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
     if let Some(room) = current_room.take() {
         leave(&registry, &room, &session).await;
     }
+    app.stats
+        .sessions_active
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     drop(session);
     let _ = writer.await;
 }

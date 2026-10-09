@@ -357,8 +357,12 @@ Improvements added:
       address in its (deterministic) sequence. Salt 0 = the classic
       address, so old clients interoperate. Switching rooms (or a changed
       address on re-join) now tears the old adapter down first.
-- [ ] **Relay metrics/stats endpoint** (the original spec mentioned one):
-      Prometheus counters for sessions, forwarded bytes, drops.
+- [x] **Metrics endpoints** for both servers (Prometheus text format,
+      off unless `HERMES_RELAY_METRICS_BIND` / `HERMES_SIGNALING_METRICS_BIND`
+      is set): sessions, rooms, forwarded packets/bytes, drops by reason,
+      registration outcomes, rate-limit hits, auth failures. Aggregate only —
+      verified in e2e tests that no addresses, node ids, names or codes leak
+      into the output. See SERVER-OPERATIONS.md.
 - [ ] **Multi-relay / geo-routing** — members pick the nearest relay;
       relays mesh to each other.
 - [ ] **Room persistence & named identities** across restarts; reconnect to

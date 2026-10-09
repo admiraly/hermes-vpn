@@ -16,6 +16,7 @@
 //! - [`broadcast`] — L2 frame forwarding, broadcast/multicast replication
 //! - [`directory`] — Signaling/relay server directory + remote manifest
 //! - [`ratelimit`] — Per-source token buckets for the servers
+//! - [`metrics`]   — Prometheus text exposition + tiny HTTP responder
 //!
 //! The top-level [`HermesEngine`] ties these together behind one API.
 
@@ -31,6 +32,7 @@ pub mod engine;
 pub mod engine_pump;
 pub mod error;
 pub mod mesh;
+pub mod metrics;
 pub mod nat;
 pub mod ratelimit;
 pub mod relay;
