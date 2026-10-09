@@ -19,7 +19,7 @@
   nsExec::ExecToLog '"$INSTDIR\hermes-daemon.exe" service install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Hermes was installed, but its background service could not be started (code $0).$\r$\n$\r$\nRun this from an administrator prompt to retry:$\r$\n\"$INSTDIR\hermes-daemon.exe\" service install"
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Hermes was installed, but its background service could not be started (code $0).$\r$\n$\r$\nRun this from an administrator prompt to retry:$\r$\n$\"$INSTDIR\hermes-daemon.exe$\" service install"
   ${EndIf}
   ; Without this, inbound peer-to-peer packets are dropped on most machines.
   nsExec::Exec 'netsh advfirewall firewall add rule name="Hermes daemon" dir=in action=allow program="$INSTDIR\hermes-daemon.exe" enable=yes profile=any'
