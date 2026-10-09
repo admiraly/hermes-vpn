@@ -4,7 +4,7 @@
 //! VPN. The daemon records which room it is in (signaling URL + invite
 //! code) in `resume.json` and, when it starts, rejoins it.
 //!
-//! The file holds an invite code, which is all it takes to be in the room,
+//! The file holds an invite code (and the room password, if any), which is all it takes to be in the room,
 //! so it is created readable by its owner only. It is written when a room
 //! is entered and removed on an explicit `leave`, when the user connects
 //! somewhere else, or when rejoining fails because the room no longer
@@ -24,6 +24,9 @@ pub struct Resume {
     pub signaling_url: String,
     /// The room's invite code.
     pub invite_code: String,
+    /// The room password, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 /// The on-disk record.
@@ -94,6 +97,7 @@ mod tests {
         let r = Resume {
             signaling_url: "wss://s.example/v1".into(),
             invite_code: "WLFK-7X4K-QR2S".into(),
+            password: Some("hunter2".into()),
         };
         store.save(&r).unwrap();
         assert_eq!(store.load(), Some(r.clone()));
@@ -129,6 +133,7 @@ mod tests {
             .save(&Resume {
                 signaling_url: "ws://x".into(),
                 invite_code: "C".into(),
+                password: None,
             })
             .unwrap();
         let mode = std::fs::metadata(d.join("resume.json"))

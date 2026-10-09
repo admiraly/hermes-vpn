@@ -80,6 +80,16 @@ pub enum EngineEvent {
     },
     /// A peer left.
     PeerRemoved(crate::crypto::NodeId),
+    /// The room's owner removed us from it.
+    Kicked {
+        /// Whether we were also banned from rejoining.
+        banned: bool,
+    },
+    /// The room's invite code changed; this is the new one.
+    InviteRotated {
+        /// The new code.
+        invite_code: InviteCode,
+    },
     /// Protocol or transport error from the signaling server.
     SignalingError {
         /// Short machine-readable code.
@@ -135,6 +145,11 @@ pub(crate) struct RoomRuntime {
     pub driver: parking_lot::Mutex<Option<mesh::DriverHandle>>,
     /// Relay keepalive + health-watcher tasks. Aborted on leave.
     pub relay_tasks: parking_lot::Mutex<Option<RelayTasks>>,
+    /// Password of the current room, kept so a re-join (after a signaling
+    /// reconnect or a server restart) can present it again.
+    pub password: parking_lot::RwLock<Option<String>>,
+    /// Owner of the current room, as the server last told us.
+    pub owner: parking_lot::RwLock<Option<crate::crypto::NodeId>>,
 }
 
 /// The two background tasks that exist while a relay session is active.
@@ -269,6 +284,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
         } => {
             // Remember the code so an automatic reconnect can re-join.
             *state.invite.write() = Some(invite_code);
+            *state.room_rt.owner.write() = Some(state.secret.public().node_id);
             if let Err(e) = enter_room(
                 state,
                 room_id,
@@ -298,7 +314,9 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             mode,
             relay_addr,
             ip_salt,
+            owner,
         } => {
+            *state.room_rt.owner.write() = owner;
             if let Err(e) = enter_room(
                 state,
                 room_id,
@@ -325,6 +343,23 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             for peer in members {
                 on_peer_joined(state, peer).await?;
             }
+            Ok(())
+        }
+        ServerMessage::Kicked { banned } => {
+            warn!(banned, "removed from the room by its owner");
+            *state.invite.write() = None;
+            *state.room_rt.password.write() = None;
+            *state.room_rt.owner.write() = None;
+            tear_down_room(&state.room_rt, Some(&state.mesh)).await;
+            let _ = state.events.send(EngineEvent::Kicked { banned }).await;
+            Ok(())
+        }
+        ServerMessage::InviteRotated { invite_code } => {
+            *state.invite.write() = Some(invite_code);
+            let _ = state
+                .events
+                .send(EngineEvent::InviteRotated { invite_code })
+                .await;
             Ok(())
         }
         ServerMessage::PeerJoined { peer } => on_peer_joined(state, peer).await,
@@ -357,11 +392,13 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
                         // Still wanted, and still not in the room?
                         if *state.invite.read() == Some(invite) && !state.signaling.is_closed() {
                             let restore = restore_info(&state.room_rt);
+                            let password = state.room_rt.password.read().clone();
                             let _ = state
                                 .signaling
                                 .send(ClientMessage::JoinRoom {
                                     code: invite,
                                     restore,
+                                    password,
                                 })
                                 .await;
                         }
@@ -384,6 +421,8 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
 async fn abandon_room(state: &Arc<PumpState>, error: &HermesError) -> Result<()> {
     warn!(?error, "could not enter room — leaving it");
     *state.invite.write() = None;
+    *state.room_rt.password.write() = None;
+    *state.room_rt.owner.write() = None;
     tear_down_room(&state.room_rt, Some(&state.mesh)).await;
     let _ = state.signaling.send(ClientMessage::LeaveRoom).await;
     let _ = state
@@ -933,6 +972,8 @@ pub(crate) fn restore_info(room_rt: &RoomRuntime) -> Option<RoomRestore> {
         name: r.name.clone(),
         mode: r.mode,
         relay_addr: r.relay_addr.clone(),
+        password: room_rt.password.read().clone(),
+        owner: *room_rt.owner.read(),
     })
 }
 

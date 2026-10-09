@@ -9,6 +9,8 @@ export function CreateOrJoinRoom() {
   const [relays, setRelays] = useState<ServerEntry[]>([]);
   const [relayAddr, setRelayAddr] = useState<string>("");
   const [p2pFallback, setP2pFallback] = useState(true);
+  const [createPassword, setCreatePassword] = useState("");
+  const [joinPassword, setJoinPassword] = useState("");
   const [busy, setBusy] = useState<"create" | "join" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,6 +41,7 @@ export function CreateOrJoinRoom() {
         name: roomName.trim(),
         mode: roomMode,
         relayAddr: wantsRelay ? relayAddr : null,
+        password: createPassword || null,
       });
     } catch (e) {
       setError(String(e));
@@ -51,7 +54,10 @@ export function CreateOrJoinRoom() {
     setError(null);
     setBusy("join");
     try {
-      await invoke("join_room", { code: inviteCode.trim().toUpperCase() });
+      await invoke("join_room", {
+        code: inviteCode.trim().toUpperCase(),
+        password: joinPassword || null,
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -133,6 +139,15 @@ export function CreateOrJoinRoom() {
               </div>
             )}
 
+            <input
+              type="password"
+              placeholder="Room password (optional)"
+              value={createPassword}
+              onChange={(e) => setCreatePassword(e.target.value)}
+              autoComplete="off"
+              maxLength={64}
+            />
+
             <div className="row">
               <button
                 className="primary"
@@ -156,6 +171,14 @@ export function CreateOrJoinRoom() {
               onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
               maxLength={14}
               spellCheck={false}
+            />
+            <input
+              type="password"
+              placeholder="Room password (if it has one)"
+              value={joinPassword}
+              onChange={(e) => setJoinPassword(e.target.value)}
+              autoComplete="off"
+              maxLength={64}
             />
             <button
               className="primary"

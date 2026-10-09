@@ -98,15 +98,37 @@ Weak spots, by design or by choice:
   way any LAN host can.
 - Can learn the other members' IP addresses (candidate exchange). Rooms are
   not anonymous from their members.
-- Can keep the invite code and let others in. Codes can't be revoked and
-  members can't be kicked yet *(not enforced)*.
+- Can keep the invite code and let others in. The room's **owner** (its
+  creator) can answer that: rotate the invite code (the old one stops
+  working, members stay), remove a member, or ban them so the code no
+  longer lets them back in. A **room password** adds a second thing a leaked
+  code isn't enough for. All of this is enforced by the signaling server,
+  so it is exactly as trustworthy as that server (see the first row's
+  "Admit anyone" caveat) and is tested in `hermes-signaling/tests/access_e2e.rs`.
+  Limits:
+  - Ownership, bans and the password live in server memory. After a server
+    restart the first returning member recreates the room; the password is
+    re-asserted by the members who hold it, and ownership only by the owner
+    claiming it for themselves, but **bans are forgotten**.
+  - Someone who has the code and invents restore data can recreate a
+    *vanished* room without its password (only after a restart, only if no
+    member returned first).
+  - A ban is by node identity; a banned person can generate a new identity.
+    Rotate the code (and use a password) if that matters.
+  - Removal reaches other members as `PeerLeft` from the server; honest
+    clients then drop that peer's tunnel. A hostile server could withhold
+    it, which again comes down to trusting the server.
+  - The password is sent to the server (over `wss://` that is encrypted in
+    transit) and held there as a salted hash; it is not a cryptographic
+    room secret and does not stop a hostile server.
 
 ### Guessing an invite code
 11 random characters from a 32-symbol alphabet = **55 bits**, drawn from the
 OS CSPRNG. The server allows 60 create/join attempts per minute per client
 IP. The 12th character is a checksum that catches typos (every single
 mistake, and every adjacent swap except `A`↔`9`); it is not a security
-feature. Codes live as long as the room has members.
+feature. Codes live as long as the room has members, or until the owner rotates
+them.
 
 ### On the local machine
 - The daemon's identity (`identity.key`, 32 bytes, mode 0600) *is* the
@@ -149,7 +171,9 @@ feature. Codes live as long as the room has members.
 1. **Cryptographic room admission.** Derive a room secret from the invite
    code so members prove they hold it to each other; then a hostile
    signaling server could no longer add itself to a room.
-2. **Revocable codes, kick/ban, room passwords.**
+2. Cryptographic enforcement of kick/ban (today the server enforces them;
+   members' clients also drop a kicked peer on `PeerLeft`, but nothing
+   stops a modified client from keeping its tunnels).
 3. Restrict who may control the Windows daemon.
 4. Per-session bandwidth limits on the relay.
 5. Sign releases and installers.

@@ -21,6 +21,9 @@ pub struct Stats {
     pub join_invalid_code: AtomicU64,
     pub room_ops_rate_limited: AtomicU64,
     pub idle_disconnects: AtomicU64,
+    pub join_denied: AtomicU64,
+    pub members_kicked: AtomicU64,
+    pub invites_rotated: AtomicU64,
 }
 
 /// `counter += 1`.
@@ -72,6 +75,9 @@ impl Stats {
                     ("restored", get(&self.rooms_restored)),
                     ("invalid_code", get(&self.join_invalid_code)),
                     ("rate_limited", get(&self.room_ops_rate_limited)),
+                    ("join_denied", get(&self.join_denied)),
+                    ("member_kicked", get(&self.members_kicked)),
+                    ("invite_rotated", get(&self.invites_rotated)),
                 ],
             )
             .counter(

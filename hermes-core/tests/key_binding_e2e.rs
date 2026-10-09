@@ -89,6 +89,7 @@ async fn hostile_server(attack: Attack) -> (String, tokio::task::JoinHandle<()>)
             ),
         };
         ws.send(send(ServerMessage::RoomJoined {
+            owner: None,
             room_id: RoomId::new_v4(),
             members: vec![PeerInfo {
                 node_id: a.node_id,

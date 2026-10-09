@@ -97,6 +97,7 @@ async fn create_room(
     name: String,
     mode: RoomMode,
     relay_addr: Option<String>,
+    password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let client = state.client().await?;
@@ -105,6 +106,7 @@ async fn create_room(
             name,
             mode,
             relay_addr,
+            password,
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -112,10 +114,34 @@ async fn create_room(
 }
 
 #[tauri::command]
-async fn join_room(code: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn join_room(
+    code: String,
+    password: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let client = state.client().await?;
     let body = client
-        .call(CommandPayload::JoinRoom { code })
+        .call(CommandPayload::JoinRoom { code, password })
+        .await
+        .map_err(|e| e.to_string())?;
+    flatten(body).map(|_| ())
+}
+
+#[tauri::command]
+async fn kick_member(node_id: String, ban: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let client = state.client().await?;
+    let body = client
+        .call(CommandPayload::KickMember { node_id, ban })
+        .await
+        .map_err(|e| e.to_string())?;
+    flatten(body).map(|_| ())
+}
+
+#[tauri::command]
+async fn rotate_invite(state: State<'_, AppState>) -> Result<(), String> {
+    let client = state.client().await?;
+    let body = client
+        .call(CommandPayload::RotateInvite)
         .await
         .map_err(|e| e.to_string())?;
     flatten(body).map(|_| ())
@@ -378,6 +404,8 @@ fn main() {
             create_room,
             join_room,
             leave_room,
+            kick_member,
+            rotate_invite,
             get_peers,
             get_servers,
             add_server,

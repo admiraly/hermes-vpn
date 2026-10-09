@@ -147,6 +147,7 @@ function enterRoom(name: string, mode: RoomMode, relay: string | null, created: 
     subnet_prefix: [10, 42],
     mode,
     relay_addr: relay,
+    is_owner: created,
   };
   state.relayHealthy = relay ? true : null;
   state.invite = created ? "WLFK-7X4K-QR2S" : null;
@@ -210,6 +211,14 @@ export async function mockInvoke(cmd: string, args?: Record<string, unknown>): P
       return null;
     case "join_room":
       enterRoom("game night", "peer_to_peer", null, false);
+      return null;
+    case "kick_member":
+      state.peers = state.peers.filter((p) => p.node_id !== args?.nodeId);
+      emit({ event: "peer_removed", node_id: String(args?.nodeId) });
+      return null;
+    case "rotate_invite":
+      state.invite = "QRST-9K2M-WLFX";
+      emit({ event: "invite_rotated", invite_code: state.invite });
       return null;
     case "leave_room":
       leaveRoom();

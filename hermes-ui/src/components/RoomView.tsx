@@ -8,6 +8,7 @@ export function RoomView({
   localEndpoint,
   reflexiveEndpoint,
   onLeave,
+  onRotateInvite,
 }: {
   room: RoomSummary;
   relayHealthy: boolean | null;
@@ -15,6 +16,7 @@ export function RoomView({
   localEndpoint: string | null;
   reflexiveEndpoint: string | null;
   onLeave: () => void;
+  onRotateInvite: () => void;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -63,6 +65,21 @@ export function RoomView({
           <span className="invite" title="Share this code so others can join">
             <code>{inviteCode}</code>
             <button onClick={copyInvite}>{copied ? "Copied ✓" : "Copy"}</button>
+            {room.is_owner && (
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Replace the invite code? The old code stops working; people already in the room stay.",
+                    )
+                  )
+                    onRotateInvite();
+                }}
+                title="Revoke the current code and make a new one"
+              >
+                New code
+              </button>
+            )}
           </span>
         )}
         <button className="danger" onClick={onLeave}>

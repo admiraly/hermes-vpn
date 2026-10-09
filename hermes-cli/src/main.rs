@@ -37,6 +37,8 @@ async fn main() {
         "status" => status().await,
         "watch" => watch().await,
         "leave" => leave().await,
+        "kick" => kick(rest).await,
+        "rotate-invite" => rotate_invite().await,
         "help" | "-h" | "--help" => {
             print_help();
             Ok(())
@@ -68,12 +70,16 @@ fn print_help() {
          \x20 add-server <signaling|relay> <name> <address>\n\
          \x20                                       add a server to the directory\n\
          \x20 use-signaling <name>                  make a signaling server the active one\n\
-         \x20 create <name> [--mode p2p|relayed] [--relay <host:port>]\n\
+         \x20 create <name> [--mode p2p|relayed] [--relay <host:port>] [--password <pw>]\n\
          \x20                                       create a room; prints the invite code\n\
-         \x20 join <INVITE-CODE>                    join a room by code\n\
+         \x20 join <INVITE-CODE> [--password <pw>]  join a room by code\n\
+         \x20 kick <alias|node-id> [--ban]          (room owner) remove a member; --ban keeps them out\n\
+         \x20 rotate-invite                         (room owner) replace the invite code\n\
          \x20 status                                show connection, room, and live peers\n\
          \x20 watch                                 stream daemon events until Ctrl-C\n\
          \x20 leave                                 leave the current room\n\n\
+         A room password can also be given in HERMES_ROOM_PASSWORD (keeps it out of\n\
+         the process list).\n\n\
          The daemon (hermes-daemon) must be running first."
     );
 }
@@ -98,6 +104,13 @@ fn positionals(args: &[String]) -> Vec<&str> {
         .take_while(|a| !a.starts_with("--"))
         .map(String::as_str)
         .collect()
+}
+
+/// The room password: `--password`, else `HERMES_ROOM_PASSWORD`.
+fn password_arg(args: &[String]) -> Option<String> {
+    flag(args, "--password")
+        .or_else(|| std::env::var("HERMES_ROOM_PASSWORD").ok())
+        .filter(|p| !p.is_empty())
 }
 
 /// Value following `--name`, if present.
@@ -257,6 +270,7 @@ async fn create(args: &[String]) -> Result<()> {
             name: (*name).to_string(),
             mode,
             relay_addr,
+            password: password_arg(args),
         })
         .await?,
     )?;
@@ -277,6 +291,7 @@ async fn join(args: &[String]) -> Result<()> {
     expect_ok(
         c.call(CommandPayload::JoinRoom {
             code: (*code).to_uppercase(),
+            password: password_arg(args),
         })
         .await?,
     )?;
@@ -344,6 +359,9 @@ async fn status() -> Result<()> {
         None => println!("room       (not in a room)"),
         Some(room) => {
             print!("room       {} [{:?}]", room.name, room.mode);
+            if room.is_owner {
+                print!(" (you own this room)");
+            }
             if let Some(r) = &room.relay_addr {
                 print!(" relay={r}");
             }
@@ -420,6 +438,68 @@ async fn watch() -> Result<()> {
     }
     println!("daemon event stream closed");
     Ok(())
+}
+
+/// Remove a member (owner only). `target` is an alias, or a node id /
+/// prefix of one, as shown by `status`.
+async fn kick(args: &[String]) -> Result<()> {
+    let p = positionals(args);
+    let Some(target) = p.first() else {
+        bail!("usage: kick <alias|node-id> [--ban]");
+    };
+    let ban = args.iter().any(|a| a == "--ban");
+    let c = client().await?;
+    let ResponseBody::Peers { peers } = c.call(CommandPayload::GetPeers).await? else {
+        bail!("unexpected response");
+    };
+    let matches: Vec<_> = peers
+        .iter()
+        .filter(|p| {
+            p.alias.eq_ignore_ascii_case(target) || p.node_id.to_base64().starts_with(*target)
+        })
+        .collect();
+    let peer = match matches.as_slice() {
+        [one] => *one,
+        [] => bail!("no member matches '{target}'"),
+        _ => bail!("'{target}' matches several members — use more of the node id"),
+    };
+    expect_ok(
+        c.call(CommandPayload::KickMember {
+            node_id: peer.node_id.to_base64(),
+            ban,
+        })
+        .await?,
+    )?;
+    println!(
+        "{} {} ({}) — the server rejects this unless you own the room",
+        if ban { "banned" } else { "removed" },
+        peer.alias,
+        peer.node_id.short()
+    );
+    Ok(())
+}
+
+async fn rotate_invite() -> Result<()> {
+    let c = client().await?;
+    let mut events = c
+        .take_events()
+        .await
+        .context("event stream already taken")?;
+    expect_ok(c.call(CommandPayload::RotateInvite).await?)?;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), events.recv()).await {
+            Ok(Some(Event::InviteRotated { invite_code })) => {
+                println!("NEW INVITE CODE: {invite_code}\n(the old code no longer works)");
+                return Ok(());
+            }
+            Ok(Some(Event::SignalingError { code, message })) => {
+                bail!("signaling [{code}]: {message}");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => bail!("daemon closed the connection"),
+            Err(_) => bail!("timed out waiting for the new code"),
+        }
+    }
 }
 
 async fn leave() -> Result<()> {

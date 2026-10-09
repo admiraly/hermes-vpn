@@ -47,6 +47,10 @@ pub enum ClientMessage {
         /// [`RoomMode::Relayed`]; the server stores it and hands it to
         /// every member so the whole room uses the same relay.
         relay_addr: Option<String>,
+        /// Optional room password. Joiners must present the same one.
+        /// The server keeps only a salted hash, in memory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     /// Join an existing room via invite code.
     JoinRoom {
@@ -61,9 +65,25 @@ pub enum ClientMessage {
         /// this lets a member do nothing it couldn't do before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         restore: Option<RoomRestore>,
+        /// The room password, if it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     /// Leave the current room (if any).
     LeaveRoom,
+    /// Owner only: remove a member from the room, and with `ban` keep
+    /// that node out for as long as the room exists.
+    KickMember {
+        /// The member to remove.
+        node_id: NodeId,
+        /// Also refuse their future joins (they could otherwise rejoin
+        /// with the invite code).
+        #[serde(default)]
+        ban: bool,
+    },
+    /// Owner only: replace the invite code. The old code stops working;
+    /// current members stay and are told the new one.
+    RotateInvite,
     /// Send our candidate list to another peer in the room for ICE.
     RelayCandidates {
         /// Destination peer.
@@ -87,6 +107,13 @@ pub struct RoomRestore {
     pub mode: RoomMode,
     /// Relay address (primary for relayed rooms, fallback for p2p rooms).
     pub relay_addr: Option<String>,
+    /// The room's password, re-asserted by members so a restored room is
+    /// not silently left open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// The owner, honoured only when it is the restoring node itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<NodeId>,
 }
 
 /// Messages sent from server → client.
@@ -132,6 +159,19 @@ pub enum ServerMessage {
         /// address would collide with an existing member's.
         #[serde(default)]
         ip_salt: u32,
+        /// The room's owner (its creator), if the server still knows one.
+        #[serde(default)]
+        owner: Option<NodeId>,
+    },
+    /// The owner removed us from the room.
+    Kicked {
+        /// Whether we were also banned.
+        banned: bool,
+    },
+    /// The room's invite code changed (the owner rotated it).
+    InviteRotated {
+        /// The new code.
+        invite_code: InviteCode,
     },
     /// A new peer joined our current room.
     PeerJoined {

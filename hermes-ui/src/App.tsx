@@ -91,6 +91,22 @@ export function App() {
           if (event.invite_code) setInviteCode(event.invite_code);
           invoke<StateSnapshot>("get_state").then(applySnapshot);
           break;
+        case "invite_rotated":
+          setInviteCode(event.invite_code);
+          break;
+        case "kicked":
+          setRoom(null);
+          setInviteCode(null);
+          setPeers([]);
+          setLinks([]);
+          setRelayHealthy(null);
+          setBanner({
+            kind: "bad",
+            text: event.banned
+              ? "The room's owner banned you from this room."
+              : "The room's owner removed you from this room.",
+          });
+          break;
         case "peer_added":
           setPeers((prev) => {
             const idx = prev.findIndex((p) => p.node_id === event.peer.node_id);
@@ -179,6 +195,26 @@ export function App() {
       setPeers([]);
       setLinks([]);
       setRelayHealthy(null);
+    } catch (e) {
+      setBanner({ kind: "bad", text: String(e) });
+    }
+  };
+
+  const handleKick = async (peer: Peer, ban: boolean) => {
+    const what = ban
+      ? `Ban ${peer.alias}? They won't be able to rejoin, even with the invite code.`
+      : `Remove ${peer.alias} from the room? They can rejoin with the invite code.`;
+    if (!window.confirm(what)) return;
+    try {
+      await invoke("kick_member", { nodeId: peer.node_id, ban });
+    } catch (e) {
+      setBanner({ kind: "bad", text: String(e) });
+    }
+  };
+
+  const handleRotateInvite = async () => {
+    try {
+      await invoke("rotate_invite");
     } catch (e) {
       setBanner({ kind: "bad", text: String(e) });
     }
@@ -287,9 +323,16 @@ export function App() {
               localEndpoint={localEndpoint}
               reflexiveEndpoint={reflexiveEndpoint}
               onLeave={handleLeave}
+              onRotateInvite={handleRotateInvite}
             />
             <div className="card" style={{ padding: "6px 8px" }}>
-              <PeerList peers={peers} links={links} inviteCode={inviteCode} />
+              <PeerList
+                peers={peers}
+                links={links}
+                inviteCode={inviteCode}
+                isOwner={room.is_owner}
+                onKick={handleKick}
+              />
             </div>
           </>
         )}

@@ -242,3 +242,84 @@ async fn linux_style_and_windows_style_nodes_exchange_traffic() {
     linux.engine.shutdown().await;
     windows.engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn owner_can_remove_a_member_through_the_engine() {
+    let port = 39832;
+    let _server = spawn_signaling(port).await;
+    let url = format!("ws://127.0.0.1:{port}/v1");
+    let mut owner = node("owner", AdapterMode::Ethernet);
+    let mut guest = node("guest", AdapterMode::Ethernet);
+
+    owner.engine.connect(Some(&url)).await.unwrap();
+    owner
+        .engine
+        .create_room_with_password("kick".into(), RoomMode::PeerToPeer, None, Some("pw".into()))
+        .await
+        .unwrap();
+    let code = wait_event(&mut owner.events, "RoomEntered", |e| match e {
+        EngineEvent::RoomEntered { invite_code, .. } => *invite_code,
+        _ => None,
+    })
+    .await;
+    assert!(owner.engine.is_room_owner());
+
+    // Wrong password: refused with a typed error, and we are not in a room.
+    guest.engine.connect(Some(&url)).await.unwrap();
+    guest
+        .engine
+        .join_room_with_password(code, Some("nope".into()))
+        .await
+        .unwrap();
+    let denied = wait_event(&mut guest.events, "bad_password", |e| match e {
+        EngineEvent::SignalingError { code, .. } => Some(code.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(denied, "bad_password");
+    assert!(guest.engine.current_room().is_none());
+
+    guest
+        .engine
+        .join_room_with_password(code, Some("pw".into()))
+        .await
+        .unwrap();
+    wait_event(&mut guest.events, "guest RoomEntered", |e| match e {
+        EngineEvent::RoomEntered { .. } => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(!guest.engine.is_room_owner());
+    let guest_id = guest.engine.identity().node_id;
+    wait_event(&mut owner.events, "owner sees guest", |e| match e {
+        EngineEvent::PeerAdded(p) if p.node_id == guest_id => Some(()),
+        _ => None,
+    })
+    .await;
+
+    // The guest cannot remove the owner; the owner can remove the guest.
+    guest
+        .engine
+        .kick_member(owner.engine.identity().node_id, false)
+        .await
+        .unwrap();
+    let refused = wait_event(&mut guest.events, "not_owner", |e| match e {
+        EngineEvent::SignalingError { code, .. } => Some(code.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(refused, "not_owner");
+
+    owner.engine.kick_member(guest_id, true).await.unwrap();
+    let banned = wait_event(&mut guest.events, "Kicked", |e| match e {
+        EngineEvent::Kicked { banned } => Some(*banned),
+        _ => None,
+    })
+    .await;
+    assert!(banned);
+    assert!(guest.engine.current_room().is_none());
+    assert!(guest.engine.current_invite().is_none(), "no auto re-join");
+
+    owner.engine.shutdown().await;
+    guest.engine.shutdown().await;
+}

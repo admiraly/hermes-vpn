@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .send(ClientMessage::JoinRoom {
             code,
             restore: None,
+            password: None,
         })
         .await?;
 
@@ -60,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
                 mode,
                 relay_addr,
                 ip_salt,
+                ..
             }) => {
                 anyhow::ensure!(mode == RoomMode::Relayed, "echo_peer needs a relayed room");
                 let relay = relay_addr.expect("relayed room has a relay");

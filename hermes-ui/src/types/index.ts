@@ -28,6 +28,8 @@ export interface RoomSummary {
   subnet_prefix: [number, number];
   mode: RoomMode;
   relay_addr: string | null;
+  /** We created this room and may remove members or replace the invite code. */
+  is_owner: boolean;
 }
 
 export interface LinkStats {
@@ -82,6 +84,8 @@ export type DaemonEvent =
       mode: RoomMode;
       relay_addr: string | null;
     }
+  | { event: "kicked"; banned: boolean }
+  | { event: "invite_rotated"; invite_code: string }
   | { event: "peer_added"; peer: Peer }
   | { event: "peer_status_changed"; node_id: string; status: PeerStatus }
   | { event: "peer_removed"; node_id: string }

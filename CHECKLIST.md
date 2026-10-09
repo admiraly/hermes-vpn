@@ -370,8 +370,12 @@ Improvements added:
       room (`resume.json`, mode 0600, in its data dir) and rejoins it after a
       restart, retrying for 15 minutes. `leave`, or connecting elsewhere,
       forgets it; `HERMES_RESUME=0` disables it. Tested in `resume_e2e.rs`.
-- [ ] **Access control beyond invite codes** — revocable codes, per-member
-      kick/ban, room passwords.
+- [x] **Access control beyond invite codes** — the room owner can rotate
+      the invite code, kick or ban members; rooms can have a password.
+      Server-enforced (protocol v4, IPC v4), in the CLI (`kick`,
+      `rotate-invite`, `--password`) and the app. Tested in `access_e2e.rs`
+      and `engine_e2e.rs`. Cryptographic enforcement is tracked under
+      "Cryptographic room admission" in THREAT-MODEL.md.
 - [ ] **Bandwidth/QoS** controls and per-room MTU negotiation.
 
 ---

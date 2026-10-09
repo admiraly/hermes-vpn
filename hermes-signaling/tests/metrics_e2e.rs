@@ -75,6 +75,7 @@ async fn metrics_reflect_real_activity() {
             name: "m".into(),
             mode: RoomMode::PeerToPeer,
             relay_addr: None,
+            password: None,
         })
         .await
         .unwrap();
@@ -90,12 +91,14 @@ async fn metrics_reflect_real_activity() {
     bob.send(ClientMessage::JoinRoom {
         code,
         restore: None,
+        password: None,
     })
     .await
     .unwrap();
     bob.send(ClientMessage::JoinRoom {
         code: InviteCode::generate(),
         restore: None,
+        password: None,
     })
     .await
     .unwrap();

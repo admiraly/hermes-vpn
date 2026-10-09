@@ -128,6 +128,7 @@ async fn create(p: &mut Peer, mode: RoomMode, relay: Option<&str>) -> (RoomId, I
             name: "lifecycle".into(),
             mode,
             relay_addr: relay.map(str::to_string),
+            password: None,
         })
         .await
         .unwrap();
@@ -148,7 +149,11 @@ async fn join(
     restore: Option<RoomRestore>,
 ) -> Result<(RoomId, Vec<NodeId>), String> {
     p.client
-        .send(ClientMessage::JoinRoom { code, restore })
+        .send(ClientMessage::JoinRoom {
+            code,
+            restore,
+            password: None,
+        })
         .await
         .unwrap();
     expect(p, "RoomJoined/Error", |m| match m {
@@ -247,6 +252,8 @@ async fn room_is_restored_after_server_restart() {
         name: "lifecycle".into(),
         mode: RoomMode::Relayed,
         relay_addr: Some("relay.example:8788".into()),
+        password: None,
+        owner: None,
     };
     let (restored, members) = join(&mut alice, code, Some(restore)).await.unwrap();
     assert_eq!(restored, room, "restored room must keep its id");
@@ -258,6 +265,7 @@ async fn room_is_restored_after_server_restart() {
         .send(ClientMessage::JoinRoom {
             code,
             restore: None,
+            password: None,
         })
         .await
         .unwrap();
@@ -294,6 +302,8 @@ async fn restore_cannot_clobber_a_live_room() {
         name: "mine now".into(),
         mode: RoomMode::PeerToPeer,
         relay_addr: None,
+        password: None,
+        owner: None,
     };
     assert_eq!(
         join(&mut mallory, InviteCode::generate(), Some(fake)).await,

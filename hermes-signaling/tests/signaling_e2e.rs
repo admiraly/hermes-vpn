@@ -74,6 +74,7 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
             name: "game night".into(),
             mode: RoomMode::Relayed,
             relay_addr: Some("relay.example.net:8788".into()),
+            password: None,
         })
         .await
         .unwrap();
@@ -102,6 +103,7 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
         .send(ClientMessage::JoinRoom {
             code: invite,
             restore: None,
+            password: None,
         })
         .await
         .unwrap();
@@ -157,6 +159,7 @@ async fn relayed_room_without_relay_address_is_rejected() {
             name: "broken".into(),
             mode: RoomMode::Relayed,
             relay_addr: None,
+            password: None,
         })
         .await
         .unwrap();
@@ -186,6 +189,7 @@ async fn p2p_room_is_the_default_and_carries_no_relay() {
             name: "classic".into(),
             mode: RoomMode::PeerToPeer,
             relay_addr: None,
+            password: None,
         })
         .await
         .unwrap();
@@ -230,6 +234,7 @@ async fn p2p_room_fallback_relay_propagates_to_joiner() {
             name: "p2p with safety net".into(),
             mode: RoomMode::PeerToPeer,
             relay_addr: Some("fallback.example.net:8788".into()),
+            password: None,
         })
         .await
         .unwrap();
@@ -256,6 +261,7 @@ async fn p2p_room_fallback_relay_propagates_to_joiner() {
         .send(ClientMessage::JoinRoom {
             code: invite,
             restore: None,
+            password: None,
         })
         .await
         .unwrap();

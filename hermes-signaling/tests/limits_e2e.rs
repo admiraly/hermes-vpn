@@ -61,6 +61,7 @@ async fn join_attempts_are_rate_limited_per_ip() {
             .send(ClientMessage::JoinRoom {
                 code: InviteCode::generate(),
                 restore: None,
+                password: None,
             })
             .await
             .unwrap();

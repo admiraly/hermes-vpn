@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, info, warn};
 
+use hermes_core::crypto::NodeId;
 use hermes_core::directory::ServerDirectory;
 use hermes_core::room::InviteCode;
 use hermes_core::EngineEvent;
@@ -78,13 +79,14 @@ impl Server {
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match &event {
-                        EngineEvent::RoomEntered { .. } => {
+                        EngineEvent::RoomEntered { .. } | EngineEvent::InviteRotated { .. } => {
                             if let (Some(url), Some(code)) =
                                 (engine.signaling_url(), engine.current_invite())
                             {
                                 let saved = Resume {
                                     signaling_url: url,
                                     invite_code: code.to_string(),
+                                    password: engine.room_password(),
                                 };
                                 if let Err(e) = resume.save(&saved) {
                                     warn!(?e, "could not save the room for resume");
@@ -96,6 +98,8 @@ impl Server {
                         EngineEvent::SignalingError { code, .. } if code == "room_failed" => {
                             resume.clear();
                         }
+                        // Removed by the owner: don't keep knocking.
+                        EngineEvent::Kicked { .. } => resume.clear(),
                         _ => {}
                     }
                     let _ = tx.send(Event::from(event));
@@ -281,18 +285,36 @@ impl Server {
                 name,
                 mode,
                 relay_addr,
-            } => match self.engine.create_room(name, mode, relay_addr).await {
+                password,
+            } => match self
+                .engine
+                .create_room_with_password(name, mode, relay_addr, password)
+                .await
+            {
                 Ok(()) => ResponseBody::Ok,
                 Err(e) => ResponseBody::error("create_room", e.to_string()),
             },
-            CommandPayload::JoinRoom { code } => {
+            CommandPayload::KickMember { node_id, ban } => {
+                let Ok(node_id) = NodeId::from_base64(&node_id) else {
+                    return ResponseBody::error("bad_node_id", "node id did not parse");
+                };
+                match self.engine.kick_member(node_id, ban).await {
+                    Ok(()) => ResponseBody::Ok,
+                    Err(e) => ResponseBody::error("kick_member", e.to_string()),
+                }
+            }
+            CommandPayload::RotateInvite => match self.engine.rotate_invite().await {
+                Ok(()) => ResponseBody::Ok,
+                Err(e) => ResponseBody::error("rotate_invite", e.to_string()),
+            },
+            CommandPayload::JoinRoom { code, password } => {
                 let parsed: InviteCode = match code.parse() {
                     Ok(c) => c,
                     Err(_) => {
                         return ResponseBody::error("invalid_code", "invite code did not parse")
                     }
                 };
-                match self.engine.join_room(parsed).await {
+                match self.engine.join_room_with_password(parsed, password).await {
                     Ok(()) => ResponseBody::Ok,
                     Err(e) => ResponseBody::error("join_room", e.to_string()),
                 }
@@ -327,6 +349,7 @@ impl Server {
                         subnet_prefix: r.subnet_prefix,
                         mode: r.mode,
                         relay_addr: r.relay_addr.clone(),
+                        is_owner: self.engine.is_room_owner(),
                     }),
                     peers: self.engine.peers(),
                     links: self.engine.peer_links(),
@@ -472,7 +495,11 @@ async fn resume_room(server: Arc<Server>, saved: Resume) {
             }
         }
     }
-    if let Err(e) = server.engine.join_room(code).await {
+    if let Err(e) = server
+        .engine
+        .join_room_with_password(code, saved.password.clone())
+        .await
+    {
         warn!(?e, "rejoin request failed");
         return;
     }
@@ -482,7 +509,14 @@ async fn resume_room(server: Arc<Server>, saved: Resume) {
             match events.recv().await {
                 Ok(Event::RoomEntered { .. }) => return Some(true),
                 Ok(Event::SignalingError { code, .. })
-                    if code == "invalid_code" || code == "room_failed" =>
+                    if matches!(
+                        code.as_str(),
+                        "invalid_code"
+                            | "room_failed"
+                            | "bad_password"
+                            | "password_required"
+                            | "banned"
+                    ) =>
                 {
                     return Some(false)
                 }

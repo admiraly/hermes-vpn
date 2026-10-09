@@ -155,6 +155,7 @@ async fn restarted_daemon_rejoins_its_room() {
         &client,
         CommandPayload::JoinRoom {
             code: code.to_string(),
+            password: None,
         },
     )
     .await;
@@ -165,7 +166,8 @@ async fn restarted_daemon_rejoins_its_room() {
         store.load(),
         Some(Resume {
             signaling_url: url.clone(),
-            invite_code: code.to_string()
+            invite_code: code.to_string(),
+            password: None,
         })
     );
 
@@ -216,6 +218,7 @@ async fn explicit_leave_is_not_resumed() {
         &client,
         CommandPayload::JoinRoom {
             code: code.to_string(),
+            password: None,
         },
     )
     .await;
@@ -250,6 +253,7 @@ async fn a_room_that_no_longer_exists_is_forgotten() {
         .save(&Resume {
             signaling_url: url,
             invite_code: InviteCode::generate().to_string(),
+            password: None,
         })
         .unwrap();
 

@@ -257,8 +257,13 @@ async fn supervise(ctx: SessionCtx, mut client: SignalingClient) {
         let invite = *ctx.invite.read();
         if let Some(code) = invite {
             let restore = engine_pump::restore_info(&ctx.room_rt);
+            let password = ctx.room_rt.password.read().clone();
             if let Err(e) = new_client
-                .send(ClientMessage::JoinRoom { code, restore })
+                .send(ClientMessage::JoinRoom {
+                    code,
+                    restore,
+                    password,
+                })
                 .await
             {
                 warn!(?e, "re-join request failed");
@@ -451,6 +456,8 @@ impl HermesEngine {
         }
         *self.pump_state.write() = None;
         *self.invite.write() = None;
+        *self.room_rt.password.write() = None;
+        *self.room_rt.owner.write() = None;
         *self.signaling_url.write() = None;
         engine_pump::tear_down_room(&self.room_rt, self.net.get().map(|n| &n.mesh)).await;
     }
@@ -488,18 +495,37 @@ impl HermesEngine {
         mode: RoomMode,
         relay_addr: Option<String>,
     ) -> Result<()> {
+        self.create_room_with_password(name, mode, relay_addr, None)
+            .await
+    }
+
+    /// [`create_room`](Self::create_room) with an optional password that
+    /// joiners must present as well as the invite code.
+    ///
+    /// # Errors
+    /// As for `create_room`.
+    pub async fn create_room_with_password(
+        &self,
+        name: String,
+        mode: RoomMode,
+        relay_addr: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         if mode == RoomMode::Relayed && relay_addr.is_none() {
             return Err(HermesError::Room(
                 "relayed room requires a relay address".into(),
             ));
         }
         let state = self.pump_state()?;
+        let password = password.filter(|p| !p.is_empty());
+        *self.room_rt.password.write() = password.clone();
         state
             .signaling
             .send(ClientMessage::CreateRoom {
                 name,
                 mode,
                 relay_addr,
+                password,
             })
             .await
     }
@@ -509,16 +535,63 @@ impl HermesEngine {
     /// # Errors
     /// Fails if we're not connected.
     pub async fn join_room(&self, code: InviteCode) -> Result<()> {
+        self.join_room_with_password(code, None).await
+    }
+
+    /// [`join_room`](Self::join_room) for a password-protected room.
+    ///
+    /// # Errors
+    /// Fails if we're not connected.
+    pub async fn join_room_with_password(
+        &self,
+        code: InviteCode,
+        password: Option<String>,
+    ) -> Result<()> {
         let state = self.pump_state()?;
+        let password = password.filter(|p| !p.is_empty());
         // Remember the code so an automatic reconnect can re-join.
         *self.invite.write() = Some(code);
+        *self.room_rt.password.write() = password.clone();
         state
             .signaling
             .send(ClientMessage::JoinRoom {
                 code,
                 restore: None,
+                password,
             })
             .await
+    }
+
+    /// Owner only: remove `node_id` from the room, and with `ban` keep
+    /// them out until the room ends. The server enforces ownership; a
+    /// non-owner gets a `not_owner` signaling error.
+    ///
+    /// # Errors
+    /// Fails if we're not connected.
+    pub async fn kick_member(&self, node_id: crate::crypto::NodeId, ban: bool) -> Result<()> {
+        self.pump_state()?
+            .signaling
+            .send(ClientMessage::KickMember { node_id, ban })
+            .await
+    }
+
+    /// Owner only: replace the room's invite code. Members stay; the old
+    /// code stops working. The new code arrives as
+    /// [`EngineEvent::InviteRotated`].
+    ///
+    /// # Errors
+    /// Fails if we're not connected.
+    pub async fn rotate_invite(&self) -> Result<()> {
+        self.pump_state()?
+            .signaling
+            .send(ClientMessage::RotateInvite)
+            .await
+    }
+
+    /// Are we the current room's owner?
+    #[must_use]
+    pub fn is_room_owner(&self) -> bool {
+        *self.room_rt.owner.read() == Some(self.secret.public().node_id)
     }
 
     /// Leave the current room, tearing down the TAP adapter and tunnels.
@@ -529,6 +602,8 @@ impl HermesEngine {
         let state = self.pump_state()?;
         // Deliberate leave — a later reconnect must not re-join.
         *self.invite.write() = None;
+        *self.room_rt.password.write() = None;
+        *self.room_rt.owner.write() = None;
         state.signaling.send(ClientMessage::LeaveRoom).await?;
         engine_pump::tear_down_room(&self.room_rt, self.net.get().map(|n| &n.mesh)).await;
         Ok(())
@@ -604,6 +679,13 @@ impl HermesEngine {
     #[must_use]
     pub fn current_invite(&self) -> Option<InviteCode> {
         *self.invite.read()
+    }
+
+    /// The current room's password, if it has one (for remembering it
+    /// across restarts).
+    #[must_use]
+    pub fn room_password(&self) -> Option<String> {
+        self.room_rt.password.read().clone()
     }
 
     /// The signaling server URL of the current session, if any.

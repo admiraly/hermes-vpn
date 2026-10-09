@@ -19,7 +19,7 @@ use hermes_core::room::{PeerRecord, PeerStatus, RoomId, RoomMode};
 /// Current protocol version. Bumped on any incompatible wire change.
 /// v2: room modes, relay assignment, server directory commands.
 /// v3: reconnect + relay-health events, `relay_healthy` in the snapshot.
-pub const IPC_PROTOCOL_VERSION: u16 = 3;
+pub const IPC_PROTOCOL_VERSION: u16 = 4;
 
 /// Envelope for every frame written on the wire.
 ///
@@ -74,12 +74,30 @@ pub enum CommandPayload {
         /// Relay address (`host:port`) — required for relayed rooms.
         #[serde(default)]
         relay_addr: Option<String>,
+        /// Optional room password joiners must also present.
+        #[serde(default)]
+        password: Option<String>,
     },
     /// Join an existing room by its 12-character invite code.
     JoinRoom {
         /// The invite code (e.g. `WLFK-7X4K-QR2S`).
         code: String,
+        /// The room password, if the room has one.
+        #[serde(default)]
+        password: Option<String>,
     },
+    /// Room owner only: remove a member, optionally banning them.
+    KickMember {
+        /// The member's node id (base64, as shown in the peer list).
+        node_id: String,
+        /// Also keep them from rejoining.
+        #[serde(default)]
+        ban: bool,
+    },
+    /// Room owner only: replace the invite code (the old one stops
+    /// working; members stay). The new code arrives as an
+    /// `invite_rotated` event.
+    RotateInvite,
     /// Leave the current room.
     LeaveRoom,
     /// Snapshot the current peer table.
@@ -220,6 +238,9 @@ pub struct RoomSummary {
     pub mode: RoomMode,
     /// Relay address when the room is relayed.
     pub relay_addr: Option<String>,
+    /// Are we the room's owner (able to kick, ban and rotate the invite)?
+    #[serde(default)]
+    pub is_owner: bool,
 }
 
 /// Snapshot of the server directory, returned by
@@ -293,6 +314,16 @@ pub enum Event {
         /// Attempt number since the disconnect.
         attempt: u32,
     },
+    /// The room's owner removed us from the room.
+    Kicked {
+        /// Whether we were also banned from rejoining.
+        banned: bool,
+    },
+    /// The room's invite code changed.
+    InviteRotated {
+        /// The new invite code.
+        invite_code: String,
+    },
     /// The signaling connection was re-established (and any current room
     /// re-joined).
     SignalingReconnected,
@@ -336,6 +367,10 @@ impl From<EngineEvent> for Event {
                 Event::SignalingReconnecting { attempt }
             }
             EngineEvent::SignalingReconnected => Event::SignalingReconnected,
+            EngineEvent::Kicked { banned } => Event::Kicked { banned },
+            EngineEvent::InviteRotated { invite_code } => Event::InviteRotated {
+                invite_code: invite_code.to_string(),
+            },
             EngineEvent::RelayUnhealthy { relay } => Event::RelayUnhealthy { relay },
             EngineEvent::RelayRestored { relay } => Event::RelayRestored { relay },
         }

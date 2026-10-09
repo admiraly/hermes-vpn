@@ -4,10 +4,14 @@ export function PeerList({
   peers,
   links,
   inviteCode,
+  isOwner,
+  onKick,
 }: {
   peers: Peer[];
   links: LinkStats[];
   inviteCode: string | null;
+  isOwner: boolean;
+  onKick: (peer: Peer, ban: boolean) => void;
 }) {
   if (peers.length === 0) {
     return (
@@ -36,6 +40,7 @@ export function PeerList({
           <th>Traffic ↑ / ↓</th>
           <th>Handshake</th>
           <th>Latency</th>
+          {isOwner && <th />}
         </tr>
       </thead>
       <tbody>
@@ -53,6 +58,20 @@ export function PeerList({
               </td>
               <td className="mono">{renderHandshake(link)}</td>
               <td className="mono">{renderLatency(link?.rtt_ms ?? peer.latency_ms)}</td>
+              {isOwner && (
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <button onClick={() => onKick(peer, false)} title="Remove from the room">
+                    Remove
+                  </button>{" "}
+                  <button
+                    className="danger"
+                    onClick={() => onKick(peer, true)}
+                    title="Remove and keep out, even with the invite code"
+                  >
+                    Ban
+                  </button>
+                </td>
+              )}
             </tr>
           );
         })}
