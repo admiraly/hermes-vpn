@@ -21,3 +21,6 @@ parking_lot.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+hermes-daemon = { path = "../hermes-daemon" }

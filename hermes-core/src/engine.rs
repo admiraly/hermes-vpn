@@ -600,6 +600,12 @@ impl HermesEngine {
         Ok(alias)
     }
 
+    /// The invite code of the room we're in (or joining), if any.
+    #[must_use]
+    pub fn current_invite(&self) -> Option<InviteCode> {
+        *self.invite.read()
+    }
+
     /// The signaling server URL of the current session, if any.
     #[must_use]
     pub fn signaling_url(&self) -> Option<String> {

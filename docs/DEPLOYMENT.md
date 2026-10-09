@@ -382,3 +382,12 @@ to see registrations, room events, and path decisions.
 
 For hardened systemd units and fleet/manifest operations, see
 [SERVER-OPERATIONS.md](SERVER-OPERATIONS.md).
+
+## Rejoining after a restart
+
+The daemon remembers the room it was in (`resume.json` in its data dir,
+mode 0600; it holds the signaling URL and invite code) and rejoins it
+automatically after a restart or reboot, retrying for up to 15 minutes if
+the server is unreachable. Running `hermes leave` or connecting to a
+different server forgets it. Set `HERMES_RESUME=0` in the daemon's
+environment to turn this off.

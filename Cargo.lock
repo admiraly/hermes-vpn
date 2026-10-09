@@ -1713,6 +1713,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hermes-core",
+ "hermes-daemon",
  "parking_lot",
  "rand 0.8.8",
  "serde_json",

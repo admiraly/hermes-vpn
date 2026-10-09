@@ -12,6 +12,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, Mutex};
@@ -19,12 +20,14 @@ use tracing::{debug, info, warn};
 
 use hermes_core::directory::ServerDirectory;
 use hermes_core::room::InviteCode;
+use hermes_core::EngineEvent;
 use hermes_core::{EngineConfig, HermesEngine};
 
 use crate::protocol::{
     CommandPayload, Event, Frame, Response, ResponseBody, RoomSummary, ServerListing,
     StateSnapshot, IPC_PROTOCOL_VERSION,
 };
+use crate::resume::{Resume, ResumeStore};
 use crate::transport::{self, FramedIpc};
 
 /// Capacity of the broadcast channel used to fan events out to all
@@ -42,6 +45,8 @@ pub struct Server {
     directory: Mutex<ServerDirectory>,
     /// Where the directory persists itself.
     data_dir: PathBuf,
+    /// The last room, so a restart rejoins it.
+    resume: ResumeStore,
 }
 
 impl Server {
@@ -52,15 +57,47 @@ impl Server {
     /// Fails if the engine cannot be initialised.
     pub fn new(config: EngineConfig) -> anyhow::Result<Arc<Self>> {
         let data_dir = config.data_dir.clone();
-        let engine = Arc::new(HermesEngine::new(config)?);
+        Ok(Self::from_engine(HermesEngine::new(config)?, data_dir))
+    }
+
+    /// Like [`Self::new`] around an engine you built yourself — e.g. one
+    /// using a different adapter factory in tests. `data_dir` should be the
+    /// engine's data directory.
+    #[must_use]
+    pub fn from_engine(engine: HermesEngine, data_dir: PathBuf) -> Arc<Self> {
+        let engine = Arc::new(engine);
+        let resume = ResumeStore::new(&data_dir);
         let (events_tx, _) = broadcast::channel(EVENT_FANOUT_CAPACITY);
 
         // Drain the engine's event receiver into our broadcast channel so
-        // every connected client gets a copy.
+        // every connected client gets a copy — and remember which room we
+        // are in, so a restart can rejoin it.
         if let Some(mut rx) = engine.take_events() {
             let tx = events_tx.clone();
+            let (engine, resume) = (engine.clone(), resume.clone());
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
+                    match &event {
+                        EngineEvent::RoomEntered { .. } => {
+                            if let (Some(url), Some(code)) =
+                                (engine.signaling_url(), engine.current_invite())
+                            {
+                                let saved = Resume {
+                                    signaling_url: url,
+                                    invite_code: code.to_string(),
+                                };
+                                if let Err(e) = resume.save(&saved) {
+                                    warn!(?e, "could not save the room for resume");
+                                }
+                            }
+                        }
+                        // We couldn't set the room up locally: don't try
+                        // the same thing again on every start.
+                        EngineEvent::SignalingError { code, .. } if code == "room_failed" => {
+                            resume.clear();
+                        }
+                        _ => {}
+                    }
                     let _ = tx.send(Event::from(event));
                 }
                 debug!("engine event stream closed");
@@ -74,7 +111,15 @@ impl Server {
             events: events_tx,
             directory: Mutex::new(directory),
             data_dir,
+            resume,
         });
+
+        // Rejoin the room we were in before we stopped (unless disabled).
+        if !resume_disabled() {
+            if let Some(saved) = server.resume.load() {
+                tokio::spawn(resume_room(server.clone(), saved));
+            }
+        }
 
         // Refresh the operator manifest in the background — best effort,
         // the cached copy keeps working offline.
@@ -94,7 +139,7 @@ impl Server {
             });
         }
 
-        Ok(server)
+        server
     }
 
     /// Serve one client on the given stream until it disconnects.
@@ -212,6 +257,9 @@ impl Server {
                 node_id_base64: self.engine.identity().node_id.to_base64(),
             },
             CommandPayload::Connect { signaling_url } => {
+                // Connecting is a deliberate (re)start: whatever room we
+                // remembered no longer applies.
+                self.resume.clear();
                 let url = match signaling_url {
                     Some(u) => u,
                     None => match self.directory.lock().await.resolve_signaling_url() {
@@ -250,7 +298,11 @@ impl Server {
                 }
             }
             CommandPayload::LeaveRoom => match self.engine.leave_room().await {
-                Ok(()) => ResponseBody::Ok,
+                Ok(()) => {
+                    // An explicit leave: don't rejoin on the next start.
+                    self.resume.clear();
+                    ResponseBody::Ok
+                }
                 Err(e) => ResponseBody::error("leave_room", e.to_string()),
             },
             CommandPayload::GetPeers => ResponseBody::Peers {
@@ -374,4 +426,78 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     transport::send_frame(framed, &Frame::Response(Response { id, result })).await
+}
+
+/// Is automatic rejoin turned off (`HERMES_RESUME=0`)?
+fn resume_disabled() -> bool {
+    std::env::var("HERMES_RESUME").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+}
+
+/// How long to keep trying to reach the signaling server after startup.
+/// At boot the network is often not up yet when the service starts.
+const RESUME_PATIENCE: Duration = Duration::from_secs(15 * 60);
+
+/// Reconnect to the saved signaling server and rejoin the saved room.
+async fn resume_room(server: Arc<Server>, saved: Resume) {
+    let Ok(code) = saved.invite_code.parse::<InviteCode>() else {
+        warn!("saved invite code is invalid — forgetting it");
+        server.resume.clear();
+        return;
+    };
+    // Watch for the outcome of the join before we start it.
+    let mut events = server.events.subscribe();
+    info!(url = %saved.signaling_url, "rejoining the room from before the restart");
+
+    let started = tokio::time::Instant::now();
+    let mut delay = Duration::from_secs(2);
+    loop {
+        // A user who got in first (connected or joined by hand) wins.
+        if server.engine.is_connected() || server.engine.current_room().is_some() {
+            debug!("already connected — not resuming");
+            return;
+        }
+        match server.engine.connect(Some(&saved.signaling_url)).await {
+            Ok(()) => break,
+            Err(e) => {
+                if started.elapsed() > RESUME_PATIENCE {
+                    warn!(
+                        ?e,
+                        "gave up reaching the signaling server; the saved room is kept"
+                    );
+                    return;
+                }
+                debug!(?e, ?delay, "signaling not reachable yet");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
+    if let Err(e) = server.engine.join_room(code).await {
+        warn!(?e, "rejoin request failed");
+        return;
+    }
+
+    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match events.recv().await {
+                Ok(Event::RoomEntered { .. }) => return Some(true),
+                Ok(Event::SignalingError { code, .. })
+                    if code == "invalid_code" || code == "room_failed" =>
+                {
+                    return Some(false)
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    })
+    .await;
+    match outcome {
+        Ok(Some(true)) => info!("rejoined the room"),
+        Ok(Some(false)) => {
+            warn!("the saved room is gone — forgetting it");
+            server.resume.clear();
+        }
+        _ => debug!("rejoin outcome unknown (timed out); keeping the saved room"),
+    }
 }

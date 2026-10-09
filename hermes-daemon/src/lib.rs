@@ -8,6 +8,7 @@
 //!
 //! - [`protocol`]  — the JSON wire types (commands, responses, events).
 //! - [`transport`] — length-prefixed framing and the platform socket path.
+//! - [`resume`]    — remembering the last room across restarts.
 //! - [`server`]    — the engine host that serves any number of clients.
 //! - [`client`]    — the client library used by the UI and CLI.
 
@@ -15,6 +16,7 @@
 
 pub mod client;
 pub mod protocol;
+pub mod resume;
 pub mod server;
 pub mod transport;
 

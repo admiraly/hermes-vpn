@@ -365,8 +365,10 @@ Improvements added:
       into the output. See SERVER-OPERATIONS.md.
 - [ ] **Multi-relay / geo-routing** — members pick the nearest relay;
       relays mesh to each other.
-- [ ] **Room persistence & named identities** across restarts; reconnect to
-      the last room automatically.
+- [x] **Room persistence** across restarts: the daemon remembers the last
+      room (`resume.json`, mode 0600, in its data dir) and rejoins it after a
+      restart, retrying for 15 minutes. `leave`, or connecting elsewhere,
+      forgets it; `HERMES_RESUME=0` disables it. Tested in `resume_e2e.rs`.
 - [ ] **Access control beyond invite codes** — revocable codes, per-member
       kick/ban, room passwords.
 - [ ] **Bandwidth/QoS** controls and per-room MTU negotiation.
