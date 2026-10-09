@@ -151,9 +151,11 @@ Full analysis, including what Hermes does **not** protect, in
 - Traffic between members is end-to-end **WireGuard**. Relays and signaling
   servers see metadata (who, where, when, how much) — never payloads.
 - Room access requires a 12-character invite code (55 random bits)
-  shared out-of-band; servers rate-limit guesses per client IP. **The
-  signaling server enforces admission**: a malicious one can add itself to a
-  room it hosts (cryptographic admission is on the roadmap).
+  shared out-of-band; servers rate-limit guesses per client IP. The
+  signaling server never sees the code: members prove to each other that
+  they hold it, so a malicious server **cannot add itself or anyone else**
+  to your room. Rooms can add a password, and the room owner can rotate the
+  code or kick/ban members. See [the threat model](docs/THREAT-MODEL.md).
 - Relay registrations are Ed25519-signed with strictly increasing
   timestamps; clients warn when signaling runs over plaintext `ws://`.
 - Treat every room member like someone on the same Ethernet switch.

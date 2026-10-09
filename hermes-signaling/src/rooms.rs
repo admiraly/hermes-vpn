@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use hermes_core::crypto::{NodeId, VirtualIpv4};
-use hermes_core::room::{InviteCode, RoomMode};
+use hermes_core::room::RoomMode;
 use hermes_core::signaling::{PeerInfo, RoomRestore, ServerMessage};
 
 /// Every room's virtual subnet (10.42.0.0/16), as the clients use it.
@@ -27,6 +27,9 @@ pub struct Session {
     /// The node's signed key binding, relayed to peers verbatim.
     pub wireguard_binding: Vec<u8>,
     pub outgoing: mpsc::Sender<ServerMessage>,
+    /// Admission proof for the session's current room (see
+    /// `hermes_core::crypto::RoomKeys`), relayed to peers verbatim.
+    pub admission: RwLock<Vec<u8>>,
     /// IP salt in the session's current room (see `insert_member`).
     pub ip_salt: AtomicU32,
 }
@@ -38,6 +41,7 @@ impl Session {
             node_id: self.node_id,
             wireguard_public: self.wireguard_public,
             wireguard_binding: self.wireguard_binding.clone(),
+            admission: self.admission.read().clone(),
             alias: self.alias.clone(),
             ip_salt: self.ip_salt.load(Ordering::Relaxed),
         }
@@ -48,15 +52,14 @@ impl Session {
 pub struct ServerRoom {
     pub id: Uuid,
     pub name: String,
-    /// Current invite code (the owner can rotate it).
-    pub invite: RwLock<InviteCode>,
+    /// Lookup token of the current invite code (the owner can rotate it).
+    /// The server never learns the code, only this.
+    pub lookup: RwLock<[u8; 32]>,
     /// The node that created the room (or re-claimed it after a server
     /// restart). Only it may kick, ban, or rotate the invite. Kept while
     /// the owner is briefly disconnected, so a reconnecting owner is still
     /// the owner.
     pub owner: RwLock<Option<NodeId>>,
-    /// Salted hash of the room password, if it has one.
-    password: RwLock<Option<[u8; 32]>>,
     /// Nodes barred from (re)joining for as long as the room exists.
     banned: RwLock<HashSet<NodeId>>,
     /// Traffic mode chosen by the creator — every joiner is told this.
@@ -66,26 +69,16 @@ pub struct ServerRoom {
     pub members: RwLock<Vec<Arc<Session>>>,
 }
 
-/// Salted with the room id so equal passwords in different rooms don't
-/// share a hash.
-fn hash_password(room: Uuid, password: &str) -> [u8; 32] {
-    let mut material = room.as_bytes().to_vec();
-    material.extend_from_slice(password.as_bytes());
-    blake3::derive_key("hermes room password v1", &material)
-}
-
 /// Why a join was refused.
 #[derive(Debug, PartialEq, Eq)]
 pub enum JoinDenied {
     Banned,
-    PasswordRequired,
-    BadPassword,
 }
 
 impl ServerRoom {
-    /// The invite code right now.
-    pub fn invite(&self) -> InviteCode {
-        *self.invite.read()
+    /// The lookup token right now.
+    pub fn lookup(&self) -> [u8; 32] {
+        *self.lookup.read()
     }
 
     /// Is `node` the owner?
@@ -93,30 +86,12 @@ impl ServerRoom {
         *self.owner.read() == Some(*node)
     }
 
-    /// Does this room require a password?
-    pub fn has_password(&self) -> bool {
-        self.password.read().is_some()
-    }
-
-    /// May `node` join with `password`?
-    pub fn admit(&self, node: &NodeId, password: Option<&str>) -> Result<(), JoinDenied> {
+    /// May `node` join?
+    pub fn admit(&self, node: &NodeId) -> Result<(), JoinDenied> {
         if self.banned.read().contains(node) {
             return Err(JoinDenied::Banned);
         }
-        let Some(expected) = *self.password.read() else {
-            return Ok(());
-        };
-        match password.filter(|p| !p.is_empty()) {
-            None => Err(JoinDenied::PasswordRequired),
-            // `blake3::Hash` equality is constant-time.
-            Some(p)
-                if blake3::Hash::from(hash_password(self.id, p))
-                    == blake3::Hash::from(expected) =>
-            {
-                Ok(())
-            }
-            Some(_) => Err(JoinDenied::BadPassword),
-        }
+        Ok(())
     }
 
     /// Bar `node` from rejoining.
@@ -185,7 +160,7 @@ impl ServerRoom {
 #[derive(Clone, Default)]
 pub struct RoomRegistry {
     by_id: Arc<DashMap<Uuid, Arc<ServerRoom>>>,
-    by_invite: Arc<DashMap<InviteCode, Uuid>>,
+    by_invite: Arc<DashMap<[u8; 32], Uuid>>,
 }
 
 impl RoomRegistry {
@@ -195,69 +170,67 @@ impl RoomRegistry {
         Self::default()
     }
 
-    /// Create a room and return it.
+    /// Create a room under `lookup` and return it, or `None` if some room
+    /// already uses that token (the creator picks a fresh code and retries).
     pub fn create(
         &self,
         name: String,
         mode: RoomMode,
         relay_addr: Option<String>,
         owner: NodeId,
-        password: Option<&str>,
-    ) -> Arc<ServerRoom> {
-        let invite = InviteCode::generate();
+        lookup: [u8; 32],
+    ) -> Option<Arc<ServerRoom>> {
         let id = Uuid::new_v4();
+        let Entry::Vacant(slot) = self.by_invite.entry(lookup) else {
+            return None;
+        };
         let room = Arc::new(ServerRoom {
             id,
             name,
-            invite: RwLock::new(invite),
+            lookup: RwLock::new(lookup),
             owner: RwLock::new(Some(owner)),
-            password: RwLock::new(
-                password
-                    .filter(|p| !p.is_empty())
-                    .map(|p| hash_password(id, p)),
-            ),
             banned: RwLock::new(HashSet::new()),
             mode,
             relay_addr,
             members: RwLock::new(Vec::new()),
         });
         self.by_id.insert(id, room.clone());
-        self.by_invite.insert(invite, id);
-        room
+        slot.insert(id);
+        Some(room)
     }
 
-    /// Look up a room by invite code.
+    /// Look up a room by lookup token.
     #[must_use]
-    pub fn find_by_invite(&self, code: &InviteCode) -> Option<Arc<ServerRoom>> {
+    pub fn find_by_lookup(&self, lookup: &[u8; 32]) -> Option<Arc<ServerRoom>> {
         self.by_invite
-            .get(code)
+            .get(lookup)
             .and_then(|id| self.by_id.get(&id).map(|r| r.clone()))
     }
 
-    /// Look up a room by invite code, or — if the code is unknown and the
+    /// Look up a room by token, or — if the token is unknown and the
     /// joiner supplied restore info — recreate it under the remembered id
-    /// and code. Used when members re-join after a server restart wiped
-    /// the in-memory registry. Atomic per code, so members racing to
+    /// and token. Used when members re-join after a server restart wiped
+    /// the in-memory registry. Atomic per token, so members racing to
     /// restore the same room all end up in one room.
     #[must_use]
     pub fn find_or_restore(
         &self,
-        code: &InviteCode,
+        lookup: &[u8; 32],
         restore: Option<RoomRestore>,
         requester: NodeId,
     ) -> Option<Arc<ServerRoom>> {
-        if let Some(room) = self.find_by_invite(code) {
+        if let Some(room) = self.find_by_lookup(lookup) {
             return Some(room);
         }
         let r = restore?;
         if r.mode == RoomMode::Relayed && r.relay_addr.as_deref().map_or(true, str::is_empty) {
             return None;
         }
-        let id = match self.by_invite.entry(*code) {
+        let id = match self.by_invite.entry(*lookup) {
             // Someone restored it a moment ago.
             Entry::Occupied(e) => *e.get(),
             Entry::Vacant(slot) => {
-                // A live room with a different code already has this id:
+                // A live room with a different token already has this id:
                 // refuse instead of clobbering it.
                 if self.by_id.contains_key(&r.room_id) {
                     return None;
@@ -265,15 +238,9 @@ impl RoomRegistry {
                 let room = Arc::new(ServerRoom {
                     id: r.room_id,
                     name: r.name,
-                    invite: RwLock::new(*code),
+                    lookup: RwLock::new(*lookup),
                     // Ownership is only ever claimed for oneself.
                     owner: RwLock::new(r.owner.filter(|o| *o == requester)),
-                    password: RwLock::new(
-                        r.password
-                            .as_deref()
-                            .filter(|p| !p.is_empty())
-                            .map(|p| hash_password(r.room_id, p)),
-                    ),
                     banned: RwLock::new(HashSet::new()),
                     mode: r.mode,
                     relay_addr: r.relay_addr,
@@ -286,14 +253,16 @@ impl RoomRegistry {
         self.by_id.get(&id).map(|room| room.clone())
     }
 
-    /// Replace `room`'s invite code with a fresh one; the old code stops
-    /// resolving at once.
-    pub fn rotate_invite(&self, room: &ServerRoom) -> InviteCode {
-        let fresh = InviteCode::generate();
-        self.by_invite.insert(fresh, room.id);
-        let old = std::mem::replace(&mut *room.invite.write(), fresh);
+    /// Point `room` at a new lookup token; the old one stops resolving at
+    /// once. `false` if the new token is already taken.
+    pub fn rotate(&self, room: &ServerRoom, new_lookup: [u8; 32]) -> bool {
+        let Entry::Vacant(slot) = self.by_invite.entry(new_lookup) else {
+            return false;
+        };
+        slot.insert(room.id);
+        let old = std::mem::replace(&mut *room.lookup.write(), new_lookup);
         self.by_invite.remove(&old);
-        fresh
+        true
     }
 
     /// Number of rooms currently tracked.
@@ -312,7 +281,7 @@ impl RoomRegistry {
     /// Remove a room (used when it becomes empty).
     pub fn remove(&self, id: Uuid) {
         if let Some((_, room)) = self.by_id.remove(&id) {
-            self.by_invite.remove(&room.invite());
+            self.by_invite.remove(&room.lookup());
         }
     }
 }
@@ -332,6 +301,7 @@ mod tests {
             wireguard_public: [0; 32],
             wireguard_binding: Vec::new(),
             outgoing,
+            admission: RwLock::new(Vec::new()),
             ip_salt: AtomicU32::new(0),
         })
     }
@@ -356,7 +326,9 @@ mod tests {
     fn colliding_newcomer_gets_a_distinct_address_and_veterans_keep_theirs() {
         let (a, b) = colliding_pair();
         let registry = RoomRegistry::new();
-        let room = registry.create("r".into(), RoomMode::PeerToPeer, None, a, None);
+        let room = registry
+            .create("r".into(), RoomMode::PeerToPeer, None, a, [1; 32])
+            .unwrap();
 
         let first = session(a);
         room.insert_member(first.clone());

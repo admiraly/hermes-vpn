@@ -45,11 +45,19 @@ async fn main() -> anyhow::Result<()> {
 
     let client = SignalingClient::connect(url, &secret, "echo-peer".into()).await?;
     let mut inbox = client.take_inbox().expect("fresh client");
+    let password = std::env::var("HERMES_ROOM_PASSWORD")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let keys = Arc::new(hermes_core::crypto::RoomKeys::derive(
+        &code,
+        password.as_deref(),
+    ));
+    let identity = secret.public();
     client
         .send(ClientMessage::JoinRoom {
-            code,
+            lookup: keys.lookup(),
+            admission: keys.prove(&identity.node_id, &identity.wireguard_public),
             restore: None,
-            password: None,
         })
         .await?;
 
@@ -93,15 +101,19 @@ async fn main() -> anyhow::Result<()> {
     );
 
     for peer in members {
-        add_peer(&mesh, &secret, relay, &peer).await?;
+        if keys.verify(&peer.node_id, &peer.wireguard_public, &peer.admission) {
+            add_peer(&mesh, &secret, relay, &peer).await?;
+        }
     }
     // Members joining later.
     {
-        let (mesh, secret) = (mesh.clone(), secret.clone());
+        let (mesh, secret, keys) = (mesh.clone(), secret.clone(), keys.clone());
         tokio::spawn(async move {
             while let Some(msg) = inbox.recv().await {
                 match msg {
-                    ServerMessage::PeerJoined { peer } => {
+                    ServerMessage::PeerJoined { peer }
+                        if keys.verify(&peer.node_id, &peer.wireguard_public, &peer.admission) =>
+                    {
                         let _ = add_peer(&mesh, &secret, relay, &peer).await;
                     }
                     ServerMessage::PeerLeft { node_id } => mesh.remove_peer(node_id).await,

@@ -51,7 +51,7 @@ pub use room::RoomMode;
 /// v2: room modes (p2p / relayed) + relay assignment.
 /// v3: signed WireGuard-key bindings (`wireguard_binding`); peers without a
 /// valid one are refused, so a hostile signaling server can't substitute keys.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Default virtual subnet assigned to rooms.
 pub const DEFAULT_VIRTUAL_SUBNET: &str = "10.42.0.0/16";

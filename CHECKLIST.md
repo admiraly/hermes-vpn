@@ -261,10 +261,13 @@ Improvements added:
       invite codes. My own adversarial pass is in the threat model (e.g. the
       invite checksum misses exactly one adjacent swap, `A`↔`9`); outside
       eyes are still wanted.
-- [ ] **Cryptographic room admission.** The signaling server enforces who is
-      in a room, so a malicious one can add itself as a member. Derive a room
-      secret from the invite code and have members prove knowledge of it to
-      each other (also the basis for revocable codes / kick-ban below).
+- [x] **Cryptographic room admission** (protocol v5). The invite code (plus
+      password) never reaches the server: it gets an Argon2id-derived lookup
+      token, and members verify each other's MAC proofs before building
+      tunnels, so a hostile server can't add itself. Rotation seals the new
+      code under the old key. Tests: `crypto::admission`, `key_binding_e2e`
+      (invented / replayed members), `access_e2e`, `engine_e2e`. Remaining:
+      per-member credentials; crypto-enforced kick/ban.
 - [ ] **Restrict who may control the Windows daemon** (today: any
       authenticated local user; remote clients are refused).
 - [ ] **Sign releases** (minisign/cosign) and Authenticode-sign the Windows
@@ -372,10 +375,10 @@ Improvements added:
       forgets it; `HERMES_RESUME=0` disables it. Tested in `resume_e2e.rs`.
 - [x] **Access control beyond invite codes** — the room owner can rotate
       the invite code, kick or ban members; rooms can have a password.
-      Server-enforced (protocol v4, IPC v4), in the CLI (`kick`,
+      Protocol v5, IPC v4; in the CLI (`kick`,
       `rotate-invite`, `--password`) and the app. Tested in `access_e2e.rs`
-      and `engine_e2e.rs`. Cryptographic enforcement is tracked under
-      "Cryptographic room admission" in THREAT-MODEL.md.
+      and `engine_e2e.rs`. Cryptographic enforcement of kick/ban is listed under
+      open problems in THREAT-MODEL.md.
 - [ ] **Bandwidth/QoS** controls and per-room MTU negotiation.
 
 ---

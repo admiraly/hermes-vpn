@@ -148,6 +148,9 @@ pub(crate) struct RoomRuntime {
     /// Password of the current room, kept so a re-join (after a signaling
     /// reconnect or a server restart) can present it again.
     pub password: parking_lot::RwLock<Option<String>>,
+    /// Keys derived from the current room's invite code and password.
+    /// They never leave this machine; the server only sees the lookup token.
+    pub keys: parking_lot::RwLock<Option<crate::crypto::RoomKeys>>,
     /// Owner of the current room, as the server last told us.
     pub owner: parking_lot::RwLock<Option<crate::crypto::NodeId>>,
 }
@@ -277,18 +280,22 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
         }
         ServerMessage::RoomCreated {
             room_id,
-            invite_code,
             mode,
             relay_addr,
             ip_salt,
         } => {
-            // Remember the code so an automatic reconnect can re-join.
-            *state.invite.write() = Some(invite_code);
+            // The code is ours (the server never sees it); it was
+            // remembered when the room was requested.
+            let invite_code = *state.invite.read();
             *state.room_rt.owner.write() = Some(state.secret.public().node_id);
             if let Err(e) = enter_room(
                 state,
                 room_id,
-                format!("room-{}", &invite_code.to_string()[..4]),
+                format!(
+                    "room-{}",
+                    invite_code.map_or_else(|| room_id.to_string(), |c| c.to_string())[..4]
+                        .to_string()
+                ),
                 mode,
                 relay_addr.clone(),
                 ip_salt,
@@ -301,7 +308,7 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
                 .events
                 .send(EngineEvent::RoomEntered {
                     room_id,
-                    invite_code: Some(invite_code),
+                    invite_code,
                     mode,
                     relay_addr,
                 })
@@ -349,18 +356,24 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
             warn!(banned, "removed from the room by its owner");
             *state.invite.write() = None;
             *state.room_rt.password.write() = None;
+            *state.room_rt.keys.write() = None;
             *state.room_rt.owner.write() = None;
             tear_down_room(&state.room_rt, Some(&state.mesh)).await;
             let _ = state.events.send(EngineEvent::Kicked { banned }).await;
             Ok(())
         }
-        ServerMessage::InviteRotated { invite_code } => {
-            *state.invite.write() = Some(invite_code);
-            let _ = state
-                .events
-                .send(EngineEvent::InviteRotated { invite_code })
-                .await;
-            Ok(())
+        ServerMessage::InviteRotated { sealed } => on_invite_rotated(state, &sealed).await,
+        ServerMessage::PeerUpdated { peer } => {
+            // A member re-proved itself under a new key. If we had refused
+            // it for want of a valid proof, it may deserve a tunnel now.
+            let known = state
+                .current_room()
+                .is_some_and(|r| r.peers().iter().any(|p| p.node_id == peer.node_id));
+            if known {
+                Ok(())
+            } else {
+                on_peer_joined(state, peer).await
+            }
         }
         ServerMessage::PeerJoined { peer } => on_peer_joined(state, peer).await,
         ServerMessage::PeerLeft { node_id } => {
@@ -392,15 +405,10 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
                         // Still wanted, and still not in the room?
                         if *state.invite.read() == Some(invite) && !state.signaling.is_closed() {
                             let restore = restore_info(&state.room_rt);
-                            let password = state.room_rt.password.read().clone();
-                            let _ = state
-                                .signaling
-                                .send(ClientMessage::JoinRoom {
-                                    code: invite,
-                                    restore,
-                                    password,
-                                })
-                                .await;
+                            if let Some(msg) = join_message(&state.room_rt, &state.secret, restore)
+                            {
+                                let _ = state.signaling.send(msg).await;
+                            }
                         }
                     });
                 }
@@ -414,6 +422,42 @@ async fn handle_message(state: &Arc<PumpState>, msg: ServerMessage) -> Result<()
     }
 }
 
+/// The owner changed the invite code. Open the new one with the key we
+/// hold, switch to its keys and re-prove ourselves so people joining with
+/// the new code can verify us.
+async fn on_invite_rotated(state: &Arc<PumpState>, sealed: &[u8]) -> Result<()> {
+    let old = state.room_rt.keys.read().clone();
+    let Some(new_code) = old.and_then(|k| k.open_code(sealed)) else {
+        warn!("ignoring an invite rotation we could not open");
+        let _ = state
+            .events
+            .send(EngineEvent::SignalingError {
+                code: "bad_rotation".into(),
+                message: "the server sent an invite change that this room's key does not open"
+                    .into(),
+            })
+            .await;
+        return Ok(());
+    };
+    let password = state.room_rt.password.read().clone();
+    let keys = derive_keys(new_code, password).await?;
+    let me = state.secret.public();
+    let proof = keys.prove(&me.node_id, &me.wireguard_public);
+    *state.room_rt.keys.write() = Some(keys);
+    *state.invite.write() = Some(new_code);
+    let _ = state
+        .signaling
+        .send(ClientMessage::Reprove { admission: proof })
+        .await;
+    let _ = state
+        .events
+        .send(EngineEvent::InviteRotated {
+            invite_code: new_code,
+        })
+        .await;
+    Ok(())
+}
+
 /// The server placed us in a room but we couldn't set it up locally
 /// (typically: no permission to create the virtual adapter). Tell the
 /// server we're not there — otherwise peers would wait on us forever —
@@ -422,6 +466,7 @@ async fn abandon_room(state: &Arc<PumpState>, error: &HermesError) -> Result<()>
     warn!(?error, "could not enter room — leaving it");
     *state.invite.write() = None;
     *state.room_rt.password.write() = None;
+    *state.room_rt.keys.write() = None;
     *state.room_rt.owner.write() = None;
     tear_down_room(&state.room_rt, Some(&state.mesh)).await;
     let _ = state.signaling.send(ClientMessage::LeaveRoom).await;
@@ -564,6 +609,32 @@ async fn on_peer_joined(state: &Arc<PumpState>, peer: PeerInfo) -> Result<()> {
                 message: format!(
                     "ignored {}: the server supplied a WireGuard key their identity doesn't vouch for \
                      (a faulty or malicious signaling server, or an outdated client)",
+                    peer.alias
+                ),
+            })
+            .await;
+        return Ok(());
+    }
+
+    // And it must prove it holds the room secret. The server only ever
+    // had a lookup token, so a member it invents, or one from another
+    // room, cannot do this: that is what stops a hostile signaling server
+    // adding itself to the virtual LAN.
+    let admitted = state
+        .room_rt
+        .keys
+        .read()
+        .as_ref()
+        .is_some_and(|k| k.verify(&peer.node_id, &peer.wireguard_public, &peer.admission));
+    if !admitted {
+        warn!(node = %peer.node_id.short(), "peer did not prove it holds the room secret — ignoring it");
+        let _ = state
+            .events
+            .send(EngineEvent::SignalingError {
+                code: "bad_peer_admission".into(),
+                message: format!(
+                    "ignored {}: they could not prove they were given this room's invite code \
+                     (a faulty or malicious signaling server, or a member mid-rotation)",
                     peer.alias
                 ),
             })
@@ -964,6 +1035,32 @@ fn ensure_relay_registration(state: &Arc<PumpState>, room_id: RoomId, relay: Soc
     });
 }
 
+/// Derive room keys off the async threads (Argon2 is meant to be slow).
+pub(crate) async fn derive_keys(
+    code: InviteCode,
+    password: Option<String>,
+) -> Result<crate::crypto::RoomKeys> {
+    tokio::task::spawn_blocking(move || crate::crypto::RoomKeys::derive(&code, password.as_deref()))
+        .await
+        .map_err(|e| HermesError::Room(format!("key derivation failed: {e}")))
+}
+
+/// The `JoinRoom` for the room we are in (or want to be in), if we have
+/// its keys.
+pub(crate) fn join_message(
+    room_rt: &RoomRuntime,
+    secret: &NodeSecret,
+    restore: Option<RoomRestore>,
+) -> Option<ClientMessage> {
+    let keys = room_rt.keys.read().clone()?;
+    let me = secret.public();
+    Some(ClientMessage::JoinRoom {
+        lookup: keys.lookup(),
+        admission: keys.prove(&me.node_id, &me.wireguard_public),
+        restore,
+    })
+}
+
 /// What we remember about the current room, for a re-join that may need
 /// to restore it on a restarted server.
 pub(crate) fn restore_info(room_rt: &RoomRuntime) -> Option<RoomRestore> {
@@ -972,7 +1069,6 @@ pub(crate) fn restore_info(room_rt: &RoomRuntime) -> Option<RoomRestore> {
         name: r.name.clone(),
         mode: r.mode,
         relay_addr: r.relay_addr.clone(),
-        password: room_rt.password.read().clone(),
         owner: *room_rt.owner.read(),
     })
 }

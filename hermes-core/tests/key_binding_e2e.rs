@@ -4,7 +4,9 @@
 //! The "server" here is a minimal WebSocket server written for the test.
 //! It authenticates the client normally, then answers the client's room
 //! join with a member whose key it chooses. A client must accept the real
-//! key (control) and refuse substituted or unvouched ones.
+//! key (control) and refuse substituted or unvouched ones — and refuse a
+//! member that cannot prove it holds the room's invite code, which is what
+//! stops a server adding itself to a room.
 
 use std::time::Duration;
 
@@ -13,7 +15,8 @@ use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
-use hermes_core::crypto::NodeSecret;
+use hermes_core::crypto::{NodeSecret, RoomKeys};
+use hermes_core::room::InviteCode;
 use hermes_core::room::RoomId;
 use hermes_core::signaling::{ClientMessage, PeerInfo, ServerMessage};
 use hermes_core::tap::mock::mock_adapter_factory;
@@ -31,7 +34,15 @@ enum Attack {
     NoBinding,
     /// The server's own key, and a binding it signed itself.
     ForgedBinding,
+    /// A perfectly valid identity and key, but no proof of the room secret:
+    /// the server inventing a member.
+    NoAdmission,
+    /// A valid member with a proof made under some *other* room's key (the
+    /// server replaying what it has seen elsewhere).
+    WrongRoomAdmission,
 }
+
+const CODE: &str = "WLFK-7X4K-QR2S";
 
 async fn hostile_server(attack: Attack) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,8 +86,17 @@ async fn hostile_server(attack: Attack) -> (String, tokio::task::JoinHandle<()>)
             }
         }
         let a = alice.public();
+        let room_keys = RoomKeys::derive(&CODE.parse().unwrap(), None);
+        let admission = match attack {
+            Attack::NoAdmission => Vec::new(),
+            Attack::WrongRoomAdmission => RoomKeys::derive(&InviteCode::generate(), None)
+                .prove(&a.node_id, &a.wireguard_public),
+            _ => room_keys.prove(&a.node_id, &a.wireguard_public),
+        };
         let (wireguard_public, wireguard_binding) = match attack {
-            Attack::None => (a.wireguard_public, alice.sign_wireguard_binding()),
+            Attack::None | Attack::NoAdmission | Attack::WrongRoomAdmission => {
+                (a.wireguard_public, alice.sign_wireguard_binding())
+            }
             Attack::SubstitutedKey => (
                 evil.public().wireguard_public,
                 alice.sign_wireguard_binding(),
@@ -95,6 +115,7 @@ async fn hostile_server(attack: Attack) -> (String, tokio::task::JoinHandle<()>)
                 node_id: a.node_id,
                 wireguard_public,
                 wireguard_binding,
+                admission,
                 alias: "alice".into(),
                 ip_salt: 0,
             }],
@@ -127,10 +148,7 @@ async fn run(attack: Attack) -> (bool, Option<String>) {
     .with_adapter_factory(factory);
     let mut events = engine.take_events().unwrap();
     engine.connect(Some(&url)).await.unwrap();
-    engine
-        .join_room("WLFK-7X4K-QR2S".parse().unwrap())
-        .await
-        .unwrap();
+    engine.join_room(CODE.parse().unwrap()).await.unwrap();
 
     let (mut added, mut error) = (false, None);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -145,7 +163,9 @@ async fn run(attack: Attack) -> (bool, Option<String>) {
                 added = true;
                 break;
             }
-            EngineEvent::SignalingError { code, .. } if code == "bad_peer_key" => {
+            EngineEvent::SignalingError { code, .. }
+                if code == "bad_peer_key" || code == "bad_peer_admission" =>
+            {
                 error = Some(code);
                 break;
             }
@@ -188,5 +208,21 @@ async fn forged_binding_is_refused() {
     assert_eq!(
         run(Attack::ForgedBinding).await,
         (false, Some("bad_peer_key".into()))
+    );
+}
+
+#[tokio::test]
+async fn invented_member_without_the_room_secret_is_refused() {
+    assert_eq!(
+        run(Attack::NoAdmission).await,
+        (false, Some("bad_peer_admission".into()))
+    );
+}
+
+#[tokio::test]
+async fn proof_from_another_room_is_refused() {
+    assert_eq!(
+        run(Attack::WrongRoomAdmission).await,
+        (false, Some("bad_peer_admission".into()))
     );
 }

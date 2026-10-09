@@ -177,6 +177,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
         wireguard_public,
         wireguard_binding,
         outgoing: outgoing_tx,
+        admission: parking_lot::RwLock::new(Vec::new()),
         ip_salt: std::sync::atomic::AtomicU32::new(0),
     });
     info!(node = %node_id.short(), session = %session.session_id, "session authenticated");
@@ -232,7 +233,8 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 name,
                 mode,
                 relay_addr,
-                password,
+                lookup,
+                admission,
             } => {
                 // A relayed room is meaningless without a relay address —
                 // reject early instead of letting every member fail to
@@ -257,8 +259,19 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     leave(&registry, &old, &session).await;
                 }
                 stats::bump(&app.stats.rooms_created);
-                let room =
-                    registry.create(name, mode, relay_addr, session.node_id, password.as_deref());
+                let Some(room) = registry.create(name, mode, relay_addr, session.node_id, lookup)
+                else {
+                    send(
+                        &session,
+                        error(
+                            "code_taken",
+                            "that invite code is already in use — pick another",
+                        ),
+                    )
+                    .await;
+                    continue;
+                };
+                *session.admission.write() = admission;
                 info!(room = %room.id, name = %room.name, mode = ?room.mode, "room created");
                 room.insert_member(session.clone());
                 current_room = Some(room.clone());
@@ -266,7 +279,6 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     &session,
                     ServerMessage::RoomCreated {
                         room_id: room.id,
-                        invite_code: room.invite(),
                         mode: room.mode,
                         relay_addr: room.relay_addr.clone(),
                         ip_salt: 0,
@@ -275,9 +287,9 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 .await;
             }
             ClientMessage::JoinRoom {
-                code,
+                lookup,
+                admission,
                 restore,
-                password,
             } => {
                 // Every attempt counts, so guessing invite codes is capped
                 // at a few dozen tries per minute per address.
@@ -287,16 +299,19 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     continue;
                 }
                 let restoring = restore.is_some();
-                let Some(room) = registry.find_or_restore(&code, restore, session.node_id) else {
+                let Some(room) = registry.find_or_restore(&lookup, restore, session.node_id) else {
                     stats::bump(&app.stats.join_invalid_code);
                     send(
                         &session,
-                        error("invalid_code", "invite code not recognised"),
+                        error(
+                            "invalid_code",
+                            "no room matches that invite code and password",
+                        ),
                     )
                     .await;
                     continue;
                 };
-                if let Err(denied) = room.admit(&session.node_id, password.as_deref()) {
+                if let Err(denied) = room.admit(&session.node_id) {
                     stats::bump(&app.stats.join_denied);
                     // A room we just recreated for this joiner and then
                     // refused them would linger empty; drop it.
@@ -316,6 +331,8 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     stats::bump(&app.stats.rooms_restored);
                     info!(room = %room.id, "room restored after server restart");
                 }
+
+                *session.admission.write() = admission;
 
                 // Join first: that assigns our IP salt (a fresh address if
                 // our default one is taken), which the others must learn.
@@ -397,7 +414,11 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     }
                 }
             }
-            ClientMessage::RotateInvite => {
+            ClientMessage::RotateInvite {
+                new_lookup,
+                admission,
+                sealed,
+            } => {
                 let Some(room) = current_room.as_ref().filter(|r| r.has_member(&session)) else {
                     continue;
                 };
@@ -409,14 +430,44 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                     .await;
                     continue;
                 }
-                let fresh = registry.rotate_invite(room);
+                if !registry.rotate(room, new_lookup) {
+                    send(
+                        &session,
+                        error(
+                            "code_taken",
+                            "that invite code is already in use — pick another",
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
+                *session.admission.write() = admission;
                 stats::bump(&app.stats.invites_rotated);
                 info!(room = %room.id, "invite code rotated");
+                // Everyone, the owner included (who switches on this echo),
+                // gets the new code sealed under the old key; the server
+                // cannot read it.
                 let members = room.members.read().clone();
-                for m in members {
+                for m in &members {
                     let _ = m
                         .outgoing
-                        .send(ServerMessage::InviteRotated { invite_code: fresh })
+                        .send(ServerMessage::InviteRotated {
+                            sealed: sealed.clone(),
+                        })
+                        .await;
+                }
+            }
+            ClientMessage::Reprove { admission } => {
+                let Some(room) = current_room.as_ref().filter(|r| r.has_member(&session)) else {
+                    continue;
+                };
+                *session.admission.write() = admission;
+                let info = session.peer_info();
+                let members = room.members.read().clone();
+                for m in members.iter().filter(|m| !Arc::ptr_eq(m, &session)) {
+                    let _ = m
+                        .outgoing
+                        .send(ServerMessage::PeerUpdated { peer: info.clone() })
                         .await;
                 }
             }
@@ -478,8 +529,6 @@ async fn send(session: &Session, msg: ServerMessage) {
 fn denied_message(denied: &JoinDenied) -> ServerMessage {
     match denied {
         JoinDenied::Banned => error("banned", "you were removed from this room"),
-        JoinDenied::PasswordRequired => error("password_required", "this room needs a password"),
-        JoinDenied::BadPassword => error("bad_password", "wrong room password"),
     }
 }
 

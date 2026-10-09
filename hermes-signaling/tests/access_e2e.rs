@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
-use hermes_core::crypto::{NodeId, NodeSecret};
+use hermes_core::crypto::{NodeId, NodeSecret, RoomKeys};
 use hermes_core::room::{InviteCode, RoomMode};
 use hermes_core::signaling::protocol::{ClientMessage, RoomRestore, ServerMessage};
 use hermes_core::signaling::SignalingClient;
@@ -44,6 +44,7 @@ async fn spawn(port: u16) -> Server {
 
 struct Client {
     id: NodeId,
+    secret: NodeSecret,
     tx: SignalingClient,
     rx: Receiver<ServerMessage>,
 }
@@ -56,9 +57,17 @@ async fn client(port: u16, name: &str) -> Client {
     let rx = tx.take_inbox().unwrap();
     Client {
         id: secret.public().node_id,
+        secret,
         tx,
         rx,
     }
+}
+
+/// A fresh invite code and its keys.
+fn room(password: Option<&str>) -> (InviteCode, RoomKeys) {
+    let code = InviteCode::generate();
+    let keys = RoomKeys::derive(&code, password);
+    (code, keys)
 }
 
 impl Client {
@@ -94,72 +103,99 @@ impl Client {
         .await
     }
 
-    async fn create(&mut self, password: Option<&str>) -> InviteCode {
-        self.send(ClientMessage::CreateRoom {
-            name: "r".into(),
-            mode: RoomMode::PeerToPeer,
-            relay_addr: None,
-            password: password.map(str::to_string),
+    async fn create(&mut self, keys: &RoomKeys) {
+        self.send(ClientMessage::create_room(
+            "r".into(),
+            RoomMode::PeerToPeer,
+            None,
+            keys,
+            &self.secret,
+        ))
+        .await;
+        self.expect("RoomCreated", |m| {
+            matches!(m, ServerMessage::RoomCreated { .. }).then_some(())
         })
         .await;
-        self.expect("RoomCreated", |m| match m {
-            ServerMessage::RoomCreated { invite_code, .. } => Some(*invite_code),
+    }
+
+    async fn join(&mut self, keys: &RoomKeys) {
+        self.send(ClientMessage::join_room(keys, &self.secret, None))
+            .await;
+    }
+
+    async fn joined(&mut self) -> Vec<hermes_core::signaling::PeerInfo> {
+        self.expect("RoomJoined", |m| match m {
+            ServerMessage::RoomJoined { members, .. } => Some(members.clone()),
             _ => None,
         })
         .await
     }
-
-    async fn join(&mut self, code: InviteCode, password: Option<&str>) {
-        self.send(ClientMessage::JoinRoom {
-            code,
-            restore: None,
-            password: password.map(str::to_string),
-        })
-        .await;
-    }
-
-    async fn joined(&mut self) {
-        self.expect("RoomJoined", |m| {
-            matches!(m, ServerMessage::RoomJoined { .. }).then_some(())
-        })
-        .await;
-    }
 }
 
 #[tokio::test]
-async fn password_protects_the_room() {
+async fn the_password_is_part_of_the_secret() {
     let port = 39851;
     let _s = spawn(port).await;
     let mut owner = client(port, "owner").await;
-    let code = owner.create(Some("s3cret")).await;
+    let code = InviteCode::generate();
+    owner.create(&RoomKeys::derive(&code, Some("s3cret"))).await;
 
+    // The code alone, or with the wrong password, finds no room: to the
+    // server it is just another unknown token.
     let mut guest = client(port, "guest").await;
-    guest.join(code, None).await;
-    assert_eq!(guest.error_code().await, "password_required");
-    guest.join(code, Some("wrong")).await;
-    assert_eq!(guest.error_code().await, "bad_password");
-    guest.join(code, Some("s3cret")).await;
+    guest.join(&RoomKeys::derive(&code, None)).await;
+    assert_eq!(guest.error_code().await, "invalid_code");
+    guest.join(&RoomKeys::derive(&code, Some("wrong"))).await;
+    assert_eq!(guest.error_code().await, "invalid_code");
+    guest.join(&RoomKeys::derive(&code, Some("s3cret"))).await;
     guest.joined().await;
+}
 
-    // A room without a password is unaffected by a password offered anyway.
-    let mut open_owner = client(port, "open").await;
-    let open_code = open_owner.create(None).await;
-    let mut other = client(port, "other").await;
-    other.join(open_code, Some("ignored")).await;
-    other.joined().await;
+/// What the server holds is enough to find a room but not to vouch for
+/// anyone in it: it sees a token and proofs, never the code or the key.
+#[tokio::test]
+async fn members_receive_each_others_proofs_which_verify_only_under_the_room_key() {
+    let port = 39855;
+    let _s = spawn(port).await;
+    let (_, keys) = room(None);
+    let (_, other_keys) = room(None);
+    let mut owner = client(port, "owner").await;
+    owner.create(&keys).await;
+    let mut guest = client(port, "guest").await;
+    guest.join(&keys).await;
+    let members = guest.joined().await;
+    let peer = members.iter().find(|p| p.node_id == owner.id).unwrap();
+    let wg = owner.secret.public().wireguard_public;
+    assert!(keys.verify(&peer.node_id, &peer.wireguard_public, &peer.admission));
+    assert_eq!(peer.wireguard_public, wg);
+    assert!(
+        !other_keys.verify(&peer.node_id, &peer.wireguard_public, &peer.admission),
+        "another room's key must not accept it"
+    );
+
+    // The owner is shown the guest's proof as well.
+    let guest_id = guest.id;
+    let seen = owner
+        .expect("PeerJoined", |m| match m {
+            ServerMessage::PeerJoined { peer } if peer.node_id == guest_id => Some(peer.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(keys.verify(&seen.node_id, &seen.wireguard_public, &seen.admission));
 }
 
 #[tokio::test]
 async fn only_the_owner_can_kick_ban_or_rotate() {
     let port = 39852;
     let _s = spawn(port).await;
+    let (_, keys) = room(None);
     let mut owner = client(port, "owner").await;
-    let code = owner.create(None).await;
+    owner.create(&keys).await;
     let mut a = client(port, "a").await;
     let mut b = client(port, "b").await;
-    a.join(code, None).await;
+    a.join(&keys).await;
     a.joined().await;
-    b.join(code, None).await;
+    b.join(&keys).await;
     b.joined().await;
 
     // A member can't remove anyone or replace the code.
@@ -169,7 +205,13 @@ async fn only_the_owner_can_kick_ban_or_rotate() {
     })
     .await;
     assert_eq!(a.error_code().await, "not_owner");
-    a.send(ClientMessage::RotateInvite).await;
+    let (next, next_keys) = room(None);
+    a.send(ClientMessage::RotateInvite {
+        new_lookup: next_keys.lookup(),
+        admission: Vec::new(),
+        sealed: keys.seal_code(&next),
+    })
+    .await;
     assert_eq!(a.error_code().await, "not_owner");
 
     // The owner can't remove themselves.
@@ -197,7 +239,7 @@ async fn only_the_owner_can_kick_ban_or_rotate() {
         matches!(m, ServerMessage::PeerLeft { node_id } if *node_id == b_id).then_some(())
     })
     .await;
-    b.join(code, None).await;
+    b.join(&keys).await;
     b.joined().await;
 
     // Kick with ban: b can't return with the code.
@@ -211,80 +253,102 @@ async fn only_the_owner_can_kick_ban_or_rotate() {
         matches!(m, ServerMessage::Kicked { banned: true }).then_some(())
     })
     .await;
-    b.join(code, None).await;
+    b.join(&keys).await;
     assert_eq!(b.error_code().await, "banned");
 }
 
 #[tokio::test]
-async fn rotating_the_invite_revokes_the_old_code() {
+async fn rotation_revokes_the_old_code_and_hands_the_new_one_over_sealed() {
     let port = 39853;
     let _s = spawn(port).await;
+    let (_, old) = room(None);
     let mut owner = client(port, "owner").await;
-    let old = owner.create(None).await;
+    owner.create(&old).await;
     let mut member = client(port, "member").await;
-    member.join(old, None).await;
+    member.join(&old).await;
     member.joined().await;
 
-    owner.send(ClientMessage::RotateInvite).await;
-    let fresh = owner
-        .expect("InviteRotated", |m| match m {
-            ServerMessage::InviteRotated { invite_code } => Some(*invite_code),
-            _ => None,
+    let (fresh_code, fresh) = room(None);
+    owner
+        .send(ClientMessage::RotateInvite {
+            new_lookup: fresh.lookup(),
+            admission: fresh.prove(&owner.id, &owner.secret.public().wireguard_public),
+            sealed: old.seal_code(&fresh_code),
         })
         .await;
-    // Existing members are told, too, so their re-joins use the new code.
-    let told = member
-        .expect("InviteRotated at member", |m| match m {
-            ServerMessage::InviteRotated { invite_code } => Some(*invite_code),
-            _ => None,
-        })
-        .await;
-    assert_eq!(told, fresh);
-    assert_ne!(old, fresh);
 
+    // Everyone in the room, the owner included, is sent the sealed code;
+    // only holders of the old key can read it.
+    for who in [&mut owner, &mut member] {
+        let sealed = who
+            .expect("InviteRotated", |m| match m {
+                ServerMessage::InviteRotated { sealed } => Some(sealed.clone()),
+                _ => None,
+            })
+            .await;
+        assert_eq!(old.open_code(&sealed), Some(fresh_code));
+        assert!(fresh.open_code(&sealed).is_none());
+    }
+
+    // The member re-proves under the new key; the owner is told.
+    member
+        .send(ClientMessage::Reprove {
+            admission: fresh.prove(&member.id, &member.secret.public().wireguard_public),
+        })
+        .await;
+    let member_id = member.id;
+    let updated = owner
+        .expect("PeerUpdated", |m| match m {
+            ServerMessage::PeerUpdated { peer } if peer.node_id == member_id => Some(peer.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(fresh.verify(
+        &updated.node_id,
+        &updated.wireguard_public,
+        &updated.admission
+    ));
+
+    // The old code is dead; the new one works and sees verifiable members.
     let mut late = client(port, "late").await;
-    late.join(old, None).await;
+    late.join(&old).await;
     assert_eq!(late.error_code().await, "invalid_code");
-    late.join(fresh, None).await;
-    late.joined().await;
+    late.join(&fresh).await;
+    let members = late.joined().await;
+    assert_eq!(members.len(), 2);
+    for p in members {
+        assert!(fresh.verify(&p.node_id, &p.wireguard_public, &p.admission));
+    }
 }
 
-/// After a server restart the first member to return recreates the room.
-/// Their password comes back with them; ownership is only ever claimed
-/// for oneself.
+/// After a server restart the first member back recreates the room under
+/// its token. Ownership is only ever claimed for oneself.
 #[tokio::test]
-async fn restored_room_keeps_its_password_and_owner_only_for_the_claimant() {
+async fn restored_room_grants_ownership_only_to_the_claimant() {
     let port = 39854;
     let _s = spawn(port).await;
     let mut owner = client(port, "owner").await;
     let mut member = client(port, "member").await;
-    let code = InviteCode::generate();
+    let (_, keys) = room(None);
     let restore = |claimed_owner: NodeId| RoomRestore {
-        room_id: uuid_for_test(),
+        room_id: uuid::Uuid::new_v4(),
         name: "restored".into(),
         mode: RoomMode::PeerToPeer,
         relay_addr: None,
-        password: Some("pw".into()),
         owner: Some(claimed_owner),
     };
 
     // The member returns first and tries to claim the owner's seat.
     member
-        .send(ClientMessage::JoinRoom {
-            code,
-            restore: Some(restore(owner.id)),
-            password: Some("pw".into()),
-        })
+        .send(ClientMessage::join_room(
+            &keys,
+            &member.secret,
+            Some(restore(owner.id)),
+        ))
         .await;
     member.joined().await;
 
-    // The password survived the restore.
-    let mut stranger = client(port, "stranger").await;
-    stranger.join(code, None).await;
-    assert_eq!(stranger.error_code().await, "password_required");
-
-    // The claim was not honoured: nobody but the claimant can hold it.
-    owner.join(code, Some("pw")).await;
+    owner.join(&keys).await;
     owner.joined().await;
     member
         .send(ClientMessage::KickMember {
@@ -304,8 +368,4 @@ async fn restored_room_keeps_its_password_and_owner_only_for_the_claimant() {
         "not_owner",
         "ownership claimed for someone else is dropped, not granted"
     );
-}
-
-fn uuid_for_test() -> uuid::Uuid {
-    uuid::Uuid::new_v4()
 }

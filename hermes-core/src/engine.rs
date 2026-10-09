@@ -255,18 +255,12 @@ async fn supervise(ctx: SessionCtx, mut client: SignalingClient) {
         // re-join of the same room and keeps the adapter and live tunnels.
         // The restore info lets a restarted server recreate the room.
         let invite = *ctx.invite.read();
-        if let Some(code) = invite {
+        if invite.is_some() {
             let restore = engine_pump::restore_info(&ctx.room_rt);
-            let password = ctx.room_rt.password.read().clone();
-            if let Err(e) = new_client
-                .send(ClientMessage::JoinRoom {
-                    code,
-                    restore,
-                    password,
-                })
-                .await
-            {
-                warn!(?e, "re-join request failed");
+            if let Some(msg) = engine_pump::join_message(&ctx.room_rt, &ctx.secret, restore) {
+                if let Err(e) = new_client.send(msg).await {
+                    warn!(?e, "re-join request failed");
+                }
             }
         }
         client = new_client;
@@ -457,6 +451,7 @@ impl HermesEngine {
         *self.pump_state.write() = None;
         *self.invite.write() = None;
         *self.room_rt.password.write() = None;
+        *self.room_rt.keys.write() = None;
         *self.room_rt.owner.write() = None;
         *self.signaling_url.write() = None;
         engine_pump::tear_down_room(&self.room_rt, self.net.get().map(|n| &n.mesh)).await;
@@ -518,16 +513,22 @@ impl HermesEngine {
         }
         let state = self.pump_state()?;
         let password = password.filter(|p| !p.is_empty());
-        *self.room_rt.password.write() = password.clone();
-        state
-            .signaling
-            .send(ClientMessage::CreateRoom {
-                name,
-                mode,
-                relay_addr,
-                password,
-            })
-            .await
+        // The invite code is made here, not by the server: the server must
+        // never be able to derive the room's admission key.
+        let code = InviteCode::generate();
+        let keys = engine_pump::derive_keys(code, password.clone()).await?;
+        let me = self.secret.public();
+        let msg = ClientMessage::CreateRoom {
+            name,
+            mode,
+            relay_addr,
+            lookup: keys.lookup(),
+            admission: keys.prove(&me.node_id, &me.wireguard_public),
+        };
+        *self.invite.write() = Some(code);
+        *self.room_rt.password.write() = password;
+        *self.room_rt.keys.write() = Some(keys);
+        state.signaling.send(msg).await
     }
 
     /// Join a room by invite code.
@@ -549,17 +550,14 @@ impl HermesEngine {
     ) -> Result<()> {
         let state = self.pump_state()?;
         let password = password.filter(|p| !p.is_empty());
+        let keys = engine_pump::derive_keys(code, password.clone()).await?;
         // Remember the code so an automatic reconnect can re-join.
         *self.invite.write() = Some(code);
-        *self.room_rt.password.write() = password.clone();
-        state
-            .signaling
-            .send(ClientMessage::JoinRoom {
-                code,
-                restore: None,
-                password,
-            })
-            .await
+        *self.room_rt.password.write() = password;
+        *self.room_rt.keys.write() = Some(keys);
+        let msg = engine_pump::join_message(&self.room_rt, &self.secret, None)
+            .expect("keys were just stored");
+        state.signaling.send(msg).await
     }
 
     /// Owner only: remove `node_id` from the room, and with `ban` keep
@@ -582,9 +580,26 @@ impl HermesEngine {
     /// # Errors
     /// Fails if we're not connected.
     pub async fn rotate_invite(&self) -> Result<()> {
-        self.pump_state()?
+        let state = self.pump_state()?;
+        let old = self
+            .room_rt
+            .keys
+            .read()
+            .clone()
+            .ok_or_else(|| HermesError::Room("not in a room".into()))?;
+        let fresh = InviteCode::generate();
+        let password = self.room_rt.password.read().clone();
+        let new = engine_pump::derive_keys(fresh, password).await?;
+        let me = self.secret.public();
+        // We switch over when the server echoes the rotation back, so a
+        // refusal (not the owner) leaves us on the old code.
+        state
             .signaling
-            .send(ClientMessage::RotateInvite)
+            .send(ClientMessage::RotateInvite {
+                new_lookup: new.lookup(),
+                admission: new.prove(&me.node_id, &me.wireguard_public),
+                sealed: old.seal_code(&fresh),
+            })
             .await
     }
 
@@ -603,6 +618,7 @@ impl HermesEngine {
         // Deliberate leave — a later reconnect must not re-join.
         *self.invite.write() = None;
         *self.room_rt.password.write() = None;
+        *self.room_rt.keys.write() = None;
         *self.room_rt.owner.write() = None;
         state.signaling.send(ClientMessage::LeaveRoom).await?;
         engine_pump::tear_down_room(&self.room_rt, self.net.get().map(|n| &n.mesh)).await;

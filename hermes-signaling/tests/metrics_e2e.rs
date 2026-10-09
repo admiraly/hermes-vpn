@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use hermes_core::crypto::NodeSecret;
+use hermes_core::crypto::RoomKeys;
 use hermes_core::room::{InviteCode, RoomMode};
 use hermes_core::signaling::protocol::{ClientMessage, ServerMessage};
 use hermes_core::signaling::SignalingClient;
@@ -66,40 +67,40 @@ async fn metrics_reflect_real_activity() {
     }
     let url = format!("ws://127.0.0.1:{ws}/v1");
 
-    let alice = SignalingClient::connect(&url, &NodeSecret::generate(), "alice".into())
+    let (alice_s, bob_s) = (NodeSecret::generate(), NodeSecret::generate());
+    let alice = SignalingClient::connect(&url, &alice_s, "alice".into())
         .await
         .unwrap();
     let mut alice_in = alice.take_inbox().unwrap();
+    let code = InviteCode::generate();
+    let keys = RoomKeys::derive(&code, None);
     alice
-        .send(ClientMessage::CreateRoom {
-            name: "m".into(),
-            mode: RoomMode::PeerToPeer,
-            relay_addr: None,
-            password: None,
-        })
+        .send(ClientMessage::create_room(
+            "m".into(),
+            RoomMode::PeerToPeer,
+            None,
+            &keys,
+            &alice_s,
+        ))
         .await
         .unwrap();
-    let code = loop {
-        if let Some(ServerMessage::RoomCreated { invite_code, .. }) = alice_in.recv().await {
-            break invite_code;
+    loop {
+        if let Some(ServerMessage::RoomCreated { .. }) = alice_in.recv().await {
+            break;
         }
-    };
-    let bob = SignalingClient::connect(&url, &NodeSecret::generate(), "bob".into())
+    }
+    let bob = SignalingClient::connect(&url, &bob_s, "bob".into())
         .await
         .unwrap();
     let mut bob_in = bob.take_inbox().unwrap();
-    bob.send(ClientMessage::JoinRoom {
-        code,
-        restore: None,
-        password: None,
-    })
-    .await
-    .unwrap();
-    bob.send(ClientMessage::JoinRoom {
-        code: InviteCode::generate(),
-        restore: None,
-        password: None,
-    })
+    bob.send(ClientMessage::join_room(&keys, &bob_s, None))
+        .await
+        .unwrap();
+    bob.send(ClientMessage::join_room(
+        &RoomKeys::derive(&InviteCode::generate(), None),
+        &bob_s,
+        None,
+    ))
     .await
     .unwrap();
     // Drain bob's two replies (RoomJoined, then the invalid-code error).

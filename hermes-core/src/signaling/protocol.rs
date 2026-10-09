@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::NodeId;
 use crate::nat::Candidate;
-use crate::room::{InviteCode, RoomId, RoomMode};
+use crate::room::{RoomId, RoomMode};
 
 /// Messages sent from client → server.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,27 +47,33 @@ pub enum ClientMessage {
         /// [`RoomMode::Relayed`]; the server stores it and hands it to
         /// every member so the whole room uses the same relay.
         relay_addr: Option<String>,
-        /// Optional room password. Joiners must present the same one.
-        /// The server keeps only a salted hash, in memory.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        password: Option<String>,
+        /// Lookup token derived from the invite code and password (see
+        /// `crypto::RoomKeys`). The server never sees the code itself, so
+        /// it can find the room but cannot vouch for anyone in it.
+        lookup: [u8; 32],
+        /// The creator's proof of holding the room secret.
+        #[serde(default)]
+        admission: Vec<u8>,
     },
-    /// Join an existing room via invite code.
+    /// Join an existing room. The client derives `lookup` from the
+    /// invite code (and password); a wrong code or password simply finds
+    /// no room.
     JoinRoom {
-        /// Invite code.
-        code: InviteCode,
+        /// Lookup token (see [`ClientMessage::CreateRoom`]).
+        lookup: [u8; 32],
+        /// Our proof of holding the room secret, shown to the other
+        /// members, who check it before building tunnels to us.
+        #[serde(default)]
+        admission: Vec<u8>,
         /// Sent only by an automatic re-join after a reconnect: the room as
-        /// this member knew it. If the server no longer knows the code
-        /// (it restarted and lost its in-memory rooms), it recreates the
-        /// room from this under the same id and code, so every member
-        /// lands back in the *same* room and live tunnels survive.
-        /// Knowing the invite code is already what grants membership, so
-        /// this lets a member do nothing it couldn't do before.
+        /// this member knew it. If the server no longer knows the room
+        /// (it restarted and lost its in-memory state), it recreates it
+        /// from this under the same id and token, so every member lands
+        /// back in the *same* room and live tunnels survive. Knowing the
+        /// lookup token is already what grants entry, so this lets a member
+        /// do nothing it couldn't do before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         restore: Option<RoomRestore>,
-        /// The room password, if it has one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        password: Option<String>,
     },
     /// Leave the current room (if any).
     LeaveRoom,
@@ -82,8 +88,24 @@ pub enum ClientMessage {
         ban: bool,
     },
     /// Owner only: replace the invite code. The old code stops working;
-    /// current members stay and are told the new one.
-    RotateInvite,
+    /// current members stay. The new code reaches them only inside
+    /// `sealed`, encrypted under the old room key, which the server can
+    /// forward but not read.
+    RotateInvite {
+        /// Lookup token for the new code.
+        new_lookup: [u8; 32],
+        /// The owner's proof under the new key.
+        #[serde(default)]
+        admission: Vec<u8>,
+        /// The new code, sealed under the old key (`RoomKeys::seal_code`).
+        sealed: Vec<u8>,
+    },
+    /// After a rotation: our proof under the new key, so people joining
+    /// with the new code can verify us.
+    Reprove {
+        /// The new proof.
+        admission: Vec<u8>,
+    },
     /// Send our candidate list to another peer in the room for ICE.
     RelayCandidates {
         /// Destination peer.
@@ -107,10 +129,6 @@ pub struct RoomRestore {
     pub mode: RoomMode,
     /// Relay address (primary for relayed rooms, fallback for p2p rooms).
     pub relay_addr: Option<String>,
-    /// The room's password, re-asserted by members so a restored room is
-    /// not silently left open.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
     /// The owner, honoured only when it is the restoring node itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<NodeId>,
@@ -135,8 +153,6 @@ pub enum ServerMessage {
     RoomCreated {
         /// The room's id.
         room_id: RoomId,
-        /// The shareable invite code.
-        invite_code: InviteCode,
         /// The room's traffic mode.
         mode: RoomMode,
         /// Relay address when the room is relayed.
@@ -168,10 +184,16 @@ pub enum ServerMessage {
         /// Whether we were also banned.
         banned: bool,
     },
-    /// The room's invite code changed (the owner rotated it).
+    /// The owner rotated the invite code. Members open `sealed` with the
+    /// room key they hold, switch to the new key, and `Reprove`.
     InviteRotated {
-        /// The new code.
-        invite_code: InviteCode,
+        /// The new code, sealed under the previous room key.
+        sealed: Vec<u8>,
+    },
+    /// A member's details changed (its admission proof after a rotation).
+    PeerUpdated {
+        /// The member as it is now.
+        peer: PeerInfo,
     },
     /// A new peer joined our current room.
     PeerJoined {
@@ -227,6 +249,11 @@ pub struct PeerInfo {
     /// own key and sitting in the middle.
     #[serde(default)]
     pub wireguard_binding: Vec<u8>,
+    /// Proof, under the room's admission key, that this member holds the
+    /// room secret (`RoomKeys::prove`). Recipients check it before building
+    /// a tunnel; the server can relay it but cannot make one.
+    #[serde(default)]
+    pub admission: Vec<u8>,
     /// Self-chosen display name.
     pub alias: String,
     /// Which address in the peer's derivation sequence it uses in this
@@ -234,4 +261,41 @@ pub struct PeerInfo {
     /// so no two members share an IP; 0 for almost everyone.
     #[serde(default)]
     pub ip_salt: u32,
+}
+
+impl ClientMessage {
+    /// A `CreateRoom` whose lookup token and admission proof come from
+    /// `keys`, as the engine sends it.
+    #[must_use]
+    pub fn create_room(
+        name: String,
+        mode: RoomMode,
+        relay_addr: Option<String>,
+        keys: &crate::crypto::RoomKeys,
+        me: &crate::crypto::NodeSecret,
+    ) -> Self {
+        let id = me.public();
+        Self::CreateRoom {
+            name,
+            mode,
+            relay_addr,
+            lookup: keys.lookup(),
+            admission: keys.prove(&id.node_id, &id.wireguard_public),
+        }
+    }
+
+    /// A `JoinRoom` for the room `keys` belong to.
+    #[must_use]
+    pub fn join_room(
+        keys: &crate::crypto::RoomKeys,
+        me: &crate::crypto::NodeSecret,
+        restore: Option<RoomRestore>,
+    ) -> Self {
+        let id = me.public();
+        Self::JoinRoom {
+            lookup: keys.lookup(),
+            admission: keys.prove(&id.node_id, &id.wireguard_public),
+            restore,
+        }
+    }
 }

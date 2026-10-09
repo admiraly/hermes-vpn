@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use hermes_core::crypto::NodeSecret;
+use hermes_core::crypto::{NodeSecret, RoomKeys};
+use hermes_core::room::InviteCode;
 use hermes_core::room::RoomMode;
 use hermes_core::signaling::protocol::{ClientMessage, ServerMessage};
 use hermes_core::signaling::SignalingClient;
@@ -69,42 +70,40 @@ async fn relayed_room_mode_propagates_to_creator_and_joiner() {
     let mut bob_inbox = bob_client.take_inbox().unwrap();
 
     // Alice creates a relayed room.
+    let code = InviteCode::generate();
+    let keys = RoomKeys::derive(&code, None);
     alice_client
-        .send(ClientMessage::CreateRoom {
-            name: "game night".into(),
-            mode: RoomMode::Relayed,
-            relay_addr: Some("relay.example.net:8788".into()),
-            password: None,
-        })
+        .send(ClientMessage::create_room(
+            "game night".into(),
+            RoomMode::Relayed,
+            Some("relay.example.net:8788".into()),
+            &keys,
+            &alice,
+        ))
         .await
         .unwrap();
 
-    let (room_id, invite) = match timeout(Duration::from_secs(3), alice_inbox.recv())
+    let room_id = match timeout(Duration::from_secs(3), alice_inbox.recv())
         .await
         .expect("timeout")
         .expect("closed")
     {
         ServerMessage::RoomCreated {
             room_id,
-            invite_code,
             mode,
             relay_addr,
             ..
         } => {
             assert_eq!(mode, RoomMode::Relayed);
             assert_eq!(relay_addr.as_deref(), Some("relay.example.net:8788"));
-            (room_id, invite_code)
+            room_id
         }
         other => panic!("expected RoomCreated, got {other:?}"),
     };
 
     // Bob joins by invite code and must learn the same mode + relay.
     bob_client
-        .send(ClientMessage::JoinRoom {
-            code: invite,
-            restore: None,
-            password: None,
-        })
+        .send(ClientMessage::join_room(&keys, &bob, None))
         .await
         .unwrap();
 
@@ -154,13 +153,15 @@ async fn relayed_room_without_relay_address_is_rejected() {
         .expect("connect");
     let mut inbox = client.take_inbox().unwrap();
 
+    let keys = RoomKeys::derive(&InviteCode::generate(), None);
     client
-        .send(ClientMessage::CreateRoom {
-            name: "broken".into(),
-            mode: RoomMode::Relayed,
-            relay_addr: None,
-            password: None,
-        })
+        .send(ClientMessage::create_room(
+            "broken".into(),
+            RoomMode::Relayed,
+            None,
+            &keys,
+            &carol,
+        ))
         .await
         .unwrap();
 
@@ -184,13 +185,15 @@ async fn p2p_room_is_the_default_and_carries_no_relay() {
         .expect("connect");
     let mut inbox = client.take_inbox().unwrap();
 
+    let keys = RoomKeys::derive(&InviteCode::generate(), None);
     client
-        .send(ClientMessage::CreateRoom {
-            name: "classic".into(),
-            mode: RoomMode::PeerToPeer,
-            relay_addr: None,
-            password: None,
-        })
+        .send(ClientMessage::create_room(
+            "classic".into(),
+            RoomMode::PeerToPeer,
+            None,
+            &keys,
+            &dave,
+        ))
         .await
         .unwrap();
 
@@ -229,40 +232,36 @@ async fn p2p_room_fallback_relay_propagates_to_joiner() {
     let mut frank_inbox = frank_client.take_inbox().unwrap();
 
     // P2P room, but with a fallback relay attached.
+    let code = InviteCode::generate();
+    let keys = RoomKeys::derive(&code, None);
     erin_client
-        .send(ClientMessage::CreateRoom {
-            name: "p2p with safety net".into(),
-            mode: RoomMode::PeerToPeer,
-            relay_addr: Some("fallback.example.net:8788".into()),
-            password: None,
-        })
+        .send(ClientMessage::create_room(
+            "p2p with safety net".into(),
+            RoomMode::PeerToPeer,
+            Some("fallback.example.net:8788".into()),
+            &keys,
+            &erin,
+        ))
         .await
         .unwrap();
 
-    let invite = match timeout(Duration::from_secs(3), erin_inbox.recv())
+    let () = match timeout(Duration::from_secs(3), erin_inbox.recv())
         .await
         .expect("timeout")
         .expect("closed")
     {
         ServerMessage::RoomCreated {
-            mode,
-            relay_addr,
-            invite_code,
-            ..
+            mode, relay_addr, ..
         } => {
             assert_eq!(mode, RoomMode::PeerToPeer);
             assert_eq!(relay_addr.as_deref(), Some("fallback.example.net:8788"));
-            invite_code
+            ()
         }
         other => panic!("expected RoomCreated, got {other:?}"),
     };
 
     frank_client
-        .send(ClientMessage::JoinRoom {
-            code: invite,
-            restore: None,
-            password: None,
-        })
+        .send(ClientMessage::join_room(&keys, &frank, None))
         .await
         .unwrap();
 

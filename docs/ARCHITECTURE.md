@@ -130,9 +130,22 @@ node sends `wireguard_binding` = Ed25519 signature over
 checks it on arrival (to keep junk out) and relays it in `PeerInfo`; **the
 receiving client verifies it again** and refuses to build a tunnel for any
 peer whose key its own identity doesn't vouch for (event `bad_peer_key`).
-The server can pass the proof along but cannot forge it. It does *not* make
-the server untrusted for admission — see
-[THREAT-MODEL.md](THREAT-MODEL.md).
+The server can pass the proof along but cannot forge it.
+
+### Room admission (protocol v5)
+
+The server is not told the invite code. The client stretches
+`code ‖ password` with Argon2id into a root key, and derives from it a
+**lookup token** (what the server stores and matches on) and an
+**admission key** (which never leaves the members). `CreateRoom` and
+`JoinRoom` carry the token and an `admission` proof = keyed BLAKE3 over
+`(node_id, wireguard_public)`; the server stores each member's proof in its
+`PeerInfo`, and **receiving clients verify it** before building a tunnel
+(`bad_peer_admission`). `RotateInvite` registers a new token and carries the
+new code sealed under the old admission key (encrypt-then-MAC with BLAKE3);
+the server echoes it to all members, who switch and send `Reprove`, answered
+to the others by `PeerUpdated`. Code: `hermes-core/src/crypto/admission.rs`.
+See [THREAT-MODEL.md](THREAT-MODEL.md) for what this does and doesn't buy.
 
 ## Virtual addressing
 

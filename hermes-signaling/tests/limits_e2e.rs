@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use hermes_core::crypto::NodeSecret;
+use hermes_core::crypto::{NodeSecret, RoomKeys};
 use hermes_core::room::InviteCode;
 use hermes_core::signaling::protocol::{ClientMessage, ServerMessage};
 use hermes_core::signaling::SignalingClient;
@@ -46,9 +46,10 @@ async fn join_attempts_are_rate_limited_per_ip() {
     let port = 39821;
     // The health-probe TCP connects above don't count: they never upgrade.
     let _server = spawn(port, &[("HERMES_SIGNALING_ROOM_OPS_PER_MIN", "3")]).await;
+    let guesser = NodeSecret::generate();
     let client = SignalingClient::connect(
         &format!("ws://127.0.0.1:{port}/v1"),
-        &NodeSecret::generate(),
+        &guesser,
         "guesser".into(),
     )
     .await
@@ -58,11 +59,11 @@ async fn join_attempts_are_rate_limited_per_ip() {
     let mut codes = Vec::new();
     for _ in 0..5 {
         client
-            .send(ClientMessage::JoinRoom {
-                code: InviteCode::generate(),
-                restore: None,
-                password: None,
-            })
+            .send(ClientMessage::join_room(
+                &RoomKeys::derive(&InviteCode::generate(), None),
+                &guesser,
+                None,
+            ))
             .await
             .unwrap();
         match timeout(Duration::from_secs(3), inbox.recv())

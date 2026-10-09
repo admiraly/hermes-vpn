@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
+use hermes_core::crypto::RoomKeys;
 use hermes_core::crypto::{NodeId, NodeSecret};
 use hermes_core::room::{InviteCode, RoomId, RoomMode};
 use hermes_core::signaling::protocol::{ClientMessage, RoomRestore, ServerMessage};
@@ -63,6 +64,7 @@ struct Peer {
     client: SignalingClient,
     inbox: Receiver<ServerMessage>,
     id: NodeId,
+    secret: NodeSecret,
 }
 
 async fn connect(url: &str, secret: &NodeSecret, alias: &str, keepalive: Keepalive) -> Peer {
@@ -74,6 +76,7 @@ async fn connect(url: &str, secret: &NodeSecret, alias: &str, keepalive: Keepali
         client,
         inbox,
         id: secret.public().node_id,
+        secret: secret.clone(),
     }
 }
 
@@ -123,24 +126,24 @@ async fn expect_none(
 }
 
 async fn create(p: &mut Peer, mode: RoomMode, relay: Option<&str>) -> (RoomId, InviteCode) {
+    let code = InviteCode::generate();
+    let keys = RoomKeys::derive(&code, None);
     p.client
-        .send(ClientMessage::CreateRoom {
-            name: "lifecycle".into(),
+        .send(ClientMessage::create_room(
+            "lifecycle".into(),
             mode,
-            relay_addr: relay.map(str::to_string),
-            password: None,
-        })
+            relay.map(str::to_string),
+            &keys,
+            &p.secret,
+        ))
         .await
         .unwrap();
-    expect(p, "RoomCreated", |m| match m {
-        ServerMessage::RoomCreated {
-            room_id,
-            invite_code,
-            ..
-        } => Some((*room_id, *invite_code)),
+    let room = expect(p, "RoomCreated", |m| match m {
+        ServerMessage::RoomCreated { room_id, .. } => Some(*room_id),
         _ => None,
     })
-    .await
+    .await;
+    (room, code)
 }
 
 async fn join(
@@ -148,12 +151,9 @@ async fn join(
     code: InviteCode,
     restore: Option<RoomRestore>,
 ) -> Result<(RoomId, Vec<NodeId>), String> {
+    let keys = RoomKeys::derive(&code, None);
     p.client
-        .send(ClientMessage::JoinRoom {
-            code,
-            restore,
-            password: None,
-        })
+        .send(ClientMessage::join_room(&keys, &p.secret, restore))
         .await
         .unwrap();
     expect(p, "RoomJoined/Error", |m| match m {
@@ -252,7 +252,6 @@ async fn room_is_restored_after_server_restart() {
         name: "lifecycle".into(),
         mode: RoomMode::Relayed,
         relay_addr: Some("relay.example:8788".into()),
-        password: None,
         owner: None,
     };
     let (restored, members) = join(&mut alice, code, Some(restore)).await.unwrap();
@@ -262,11 +261,11 @@ async fn room_is_restored_after_server_restart() {
     // Now the plain code works again and leads to the same room, with the
     // original mode and relay.
     bob.client
-        .send(ClientMessage::JoinRoom {
-            code,
-            restore: None,
-            password: None,
-        })
+        .send(ClientMessage::join_room(
+            &RoomKeys::derive(&code, None),
+            &bob.secret,
+            None,
+        ))
         .await
         .unwrap();
     expect(&mut bob, "RoomJoined", |m| match m {
@@ -302,7 +301,6 @@ async fn restore_cannot_clobber_a_live_room() {
         name: "mine now".into(),
         mode: RoomMode::PeerToPeer,
         relay_addr: None,
-        password: None,
         owner: None,
     };
     assert_eq!(

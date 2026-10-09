@@ -42,12 +42,30 @@ Can:
   (in the clear on its own side), client IPs, and every candidate address
   — i.e. the social graph and locations. **Metadata is not hidden from it.**
 - Refuse service, drop or reorder messages, split rooms.
-- **Admit anyone to any room it hosts**, including itself: it decides
-  which members peers are told about, and peers build tunnels to whoever
-  they're told about. *The invite code is enforced by the server, not
-  cryptographically.* A hostile server can therefore join your virtual LAN
-  as a member. *(not enforced — room admission is a known gap; see
-  "Open problems".)*
+- Decide whether a room exists, who is told about whom, and when members
+  appear to join or leave (so it can disrupt a room), and kick, ban or
+  reassign ownership as it likes.
+
+Cannot **add anyone to your virtual LAN** — itself included (protocol v5,
+tested in `hermes-core/tests/key_binding_e2e.rs` and `access_e2e.rs`).
+The server is never given the invite code. Clients send it a *lookup token*
+= a hash of an Argon2id key stretched from `code ‖ password`, and every
+member publishes a MAC, under a second key derived from the same stretch,
+over its `(node_id, wireguard_public)`. Peers verify that proof before
+building a tunnel (`bad_peer_admission` otherwise). The server relays the
+proofs but, not knowing the key, cannot make one for a member it invents
+or replay one from another room.
+Residual risks:
+- **Offline guessing of the code from the token.** The token is
+  `blake3(Argon2id(code ‖ password, 19 MiB, 2 passes))`. A server that wants
+  to learn the code must try codes: 2^55 of them without a password, each
+  costing tens of milliseconds and 19 MiB. That is out of reach for a casual
+  attacker and expensive for a well-funded one; a password multiplies it. It
+  is **not** information-theoretic, so don't treat a short-lived 55-bit code
+  as a vault, and use a password for anything that matters.
+- Everyone who holds the code and password (any member, anyone it leaked
+  to) can produce valid proofs. This is a shared secret, not per-member
+  credentials.
 
 Cannot (tested in `hermes-core/tests/key_binding_e2e.rs`):
 - **Read or modify traffic between members, or impersonate an existing
@@ -99,28 +117,28 @@ Weak spots, by design or by choice:
 - Can learn the other members' IP addresses (candidate exchange). Rooms are
   not anonymous from their members.
 - Can keep the invite code and let others in. The room's **owner** (its
-  creator) can answer that: rotate the invite code (the old one stops
-  working, members stay), remove a member, or ban them so the code no
-  longer lets them back in. A **room password** adds a second thing a leaked
-  code isn't enough for. All of this is enforced by the signaling server,
-  so it is exactly as trustworthy as that server (see the first row's
-  "Admit anyone" caveat) and is tested in `hermes-signaling/tests/access_e2e.rs`.
-  Limits:
-  - Ownership, bans and the password live in server memory. After a server
-    restart the first returning member recreates the room; the password is
-    re-asserted by the members who hold it, and ownership only by the owner
-    claiming it for themselves, but **bans are forgotten**.
-  - Someone who has the code and invents restore data can recreate a
-    *vanished* room without its password (only after a restart, only if no
-    member returned first).
-  - A ban is by node identity; a banned person can generate a new identity.
-    Rotate the code (and use a password) if that matters.
-  - Removal reaches other members as `PeerLeft` from the server; honest
-    clients then drop that peer's tunnel. A hostile server could withhold
-    it, which again comes down to trusting the server.
-  - The password is sent to the server (over `wss://` that is encrypted in
-    transit) and held there as a salted hash; it is not a cryptographic
-    room secret and does not stop a hostile server.
+  creator) can answer that:
+  - **rotate the invite code**: members are sent the new code *sealed under
+    the old room key* (the server forwards it blind), switch keys and
+    re-prove themselves; the old code stops finding the room, and anyone
+    who only held the old code cannot be admitted by anybody;
+  - **remove or ban** a member (server-enforced; a ban keeps that node
+    identity from rejoining while the room exists).
+  A **room password** is mixed into the same secret, so a leaked code alone
+  is not enough, and the server cannot tell a wrong password from a wrong
+  code. For a real revocation, ban *and* rotate: ban stops the identity,
+  rotation stops anyone still holding the old code.
+  Limits (tested in `access_e2e.rs`, `engine_e2e.rs`):
+  - Kick, ban and ownership are **enforced by the server**, so a hostile
+    server can lift a ban or refuse one. Rotation is the part a hostile
+    server cannot undo.
+  - Ownership and bans live in server memory. After a restart the first
+    returning member recreates the room; ownership only goes to a node
+    claiming it for itself, and **bans are forgotten**.
+  - A ban is by node identity; a banned person can generate a new one.
+  - Rotation needs the owner online. A member offline during a rotation
+    holds the old code and must be given the new one by hand.
+  - Wrong-password and wrong-code both read as `invalid_code`.
 
 ### Guessing an invite code
 11 random characters from a 32-symbol alphabet = **55 bits**, drawn from the
@@ -168,9 +186,9 @@ them.
 - Protect confidentiality of anything sent over `ws://` signaling.
 
 ## Open problems (tracked in CHECKLIST.md)
-1. **Cryptographic room admission.** Derive a room secret from the invite
-   code so members prove they hold it to each other; then a hostile
-   signaling server could no longer add itself to a room.
+1. Per-member credentials for admission. Today the room secret is shared,
+   so any holder can vouch for any node; there is no way to admit one
+   person and not let them admit others.
 2. Cryptographic enforcement of kick/ban (today the server enforces them;
    members' clients also drop a kicked peer on `PeerLeft`, but nothing
    stops a modified client from keeping its tunnels).

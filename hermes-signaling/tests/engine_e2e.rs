@@ -264,19 +264,21 @@ async fn owner_can_remove_a_member_through_the_engine() {
     .await;
     assert!(owner.engine.is_room_owner());
 
-    // Wrong password: refused with a typed error, and we are not in a room.
+    // Wrong password: no such room, and we are not in one.
     guest.engine.connect(Some(&url)).await.unwrap();
     guest
         .engine
         .join_room_with_password(code, Some("nope".into()))
         .await
         .unwrap();
-    let denied = wait_event(&mut guest.events, "bad_password", |e| match e {
+    let denied = wait_event(&mut guest.events, "wrong-password error", |e| match e {
         EngineEvent::SignalingError { code, .. } => Some(code.clone()),
         _ => None,
     })
     .await;
-    assert_eq!(denied, "bad_password");
+    // A wrong password derives a different token: the server just sees an
+    // unknown code.
+    assert_eq!(denied, "invalid_code");
     assert!(guest.engine.current_room().is_none());
 
     guest
@@ -322,4 +324,74 @@ async fn owner_can_remove_a_member_through_the_engine() {
 
     owner.engine.shutdown().await;
     guest.engine.shutdown().await;
+}
+
+/// Rotation through whole engines: members follow the new code without
+/// the server ever learning it, the old code stops working, and a newcomer
+/// with the new code is accepted by the members (their proofs were
+/// re-issued under the new key).
+#[tokio::test]
+async fn rotating_the_invite_keeps_members_and_admits_newcomers_only_with_the_new_code() {
+    let port = 39833;
+    let _server = spawn_signaling(port).await;
+    let url = format!("ws://127.0.0.1:{port}/v1");
+    let mut owner = node("rot-owner", AdapterMode::Ethernet);
+    let mut member = node("rot-member", AdapterMode::Ethernet);
+    let mut late = node("rot-late", AdapterMode::Ethernet);
+
+    owner.engine.connect(Some(&url)).await.unwrap();
+    owner
+        .engine
+        .create_room("rot".into(), RoomMode::PeerToPeer, None)
+        .await
+        .unwrap();
+    let old = wait_event(&mut owner.events, "RoomEntered", |e| match e {
+        EngineEvent::RoomEntered { invite_code, .. } => *invite_code,
+        _ => None,
+    })
+    .await;
+    member.engine.connect(Some(&url)).await.unwrap();
+    member.engine.join_room(old).await.unwrap();
+    let connected = |e: &EngineEvent| match e {
+        EngineEvent::PeerStatusChanged {
+            status: PeerStatus::Connected(_),
+            ..
+        } => Some(()),
+        _ => None,
+    };
+    wait_event(&mut member.events, "member connected", connected).await;
+
+    owner.engine.rotate_invite().await.unwrap();
+    let fresh_owner = wait_event(&mut owner.events, "owner InviteRotated", |e| match e {
+        EngineEvent::InviteRotated { invite_code } => Some(*invite_code),
+        _ => None,
+    })
+    .await;
+    let fresh_member = wait_event(&mut member.events, "member InviteRotated", |e| match e {
+        EngineEvent::InviteRotated { invite_code } => Some(*invite_code),
+        _ => None,
+    })
+    .await;
+    assert_eq!(fresh_owner, fresh_member);
+    assert_ne!(fresh_owner, old);
+    assert_eq!(member.engine.current_invite(), Some(fresh_owner));
+
+    // The old code no longer opens the room...
+    late.engine.connect(Some(&url)).await.unwrap();
+    late.engine.join_room(old).await.unwrap();
+    let denied = wait_event(&mut late.events, "invalid_code", |e| match e {
+        EngineEvent::SignalingError { code, .. } => Some(code.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(denied, "invalid_code");
+
+    // ...the new one does, and both existing members verify as genuine.
+    late.engine.join_room(fresh_owner).await.unwrap();
+    wait_event(&mut late.events, "late connected to someone", connected).await;
+    assert!(!late.engine.peers().is_empty());
+
+    for n in [&owner, &member, &late] {
+        n.engine.shutdown().await;
+    }
 }
