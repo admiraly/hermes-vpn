@@ -51,3 +51,6 @@ Check "service is gone" (-not (Get-Service HermesDaemon -ErrorAction SilentlyCon
 Check "firewall rule is gone" ((netsh advfirewall firewall show rule name="Hermes daemon" | Out-String) -notmatch "Rule Name")
 Check "daemon exe is gone" (-not (Test-Path (Join-Path $dir "hermes-daemon.exe")))
 Write-Host "PASS"
+# netsh (above) exits 1 when the rule it looked for is gone, which is the expected
+# result; do not let that leak out as the script's exit code.
+exit 0
