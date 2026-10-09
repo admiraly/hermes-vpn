@@ -15,3 +15,6 @@ Thumbs.db
 
 # Local runtime artifacts
 *.log
+
+# Windows installer staging (packaging/windows/stage.ps1)
+hermes-ui/src-tauri/installer-stage/

@@ -91,36 +91,34 @@ jobs:
       - name: Build servers, daemon and CLI
         run: cargo build --release --locked -p hermes-signaling -p hermes-relay -p hermes-daemon -p hermes-cli
 
-      - name: Fetch and verify wintun.dll
+      # Daemon, CLI and a checksum-verified wintun.dll, shared by the
+      # portable zip and the installer.
+      - name: Stage daemon, CLI and wintun.dll
         shell: pwsh
-        run: |
-          Invoke-WebRequest "https://www.wintun.net/builds/wintun-$env:WINTUN_VERSION.zip" -OutFile wintun.zip
-          $hash = (Get-FileHash wintun.zip -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne $env:WINTUN_SHA256) { throw "wintun.zip checksum mismatch: $hash" }
-          Expand-Archive wintun.zip -DestinationPath wintun
+        run: ./packaging/windows/stage.ps1
 
-      - name: Package binaries
+      - name: Package binaries (portable zip)
         shell: pwsh
         run: |
           $name = "hermes-$env:TAG-windows-x86_64"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/release/hermes-signaling.exe, target/release/hermes-relay.exe, `
-                    target/release/hermes-daemon.exe, target/release/hermes.exe $name
-          Copy-Item wintun/wintun/bin/amd64/wintun.dll $name
-          Copy-Item wintun/wintun/LICENSE.txt "$name/wintun-LICENSE.txt"
-          Copy-Item LICENSE.md, README.md, TEST-RUN.md $name
+          Copy-Item target/release/hermes-signaling.exe, target/release/hermes-relay.exe $name
+          Copy-Item hermes-ui/src-tauri/installer-stage/* $name
+          Copy-Item README.md, TEST-RUN.md $name
           New-Item -ItemType Directory dist | Out-Null
           Compress-Archive $name "dist/$name.zip"
 
-      - name: Build desktop app (MSI, NSIS)
+      # One NSIS installer: the app, the daemon registered as a service, the
+      # CLI and wintun.dll. (No MSI: it would not register the service.)
+      - name: Build installer
         working-directory: hermes-ui
         run: |
           npm ci
-          npx tauri build --bundles msi,nsis
-      - name: Collect desktop bundles
+          npx tauri build --config src-tauri/tauri.installer.conf.json
+      - name: Collect installer
         shell: pwsh
         run: |
-          Get-ChildItem target/release/bundle -Recurse -Include *.msi, *-setup.exe | Copy-Item -Destination dist
+          Get-ChildItem target/release/bundle/nsis -Filter *-setup.exe | Copy-Item -Destination dist
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
@@ -158,7 +156,7 @@ jobs:
             ([Linux](https://github.com/admiraly/hermes-vpn/blob/master/docs/DEPLOYMENT.md#5a-linux-client):
             `sudo ./install.sh` from the tarball;
             [Windows](https://github.com/admiraly/hermes-vpn/blob/master/docs/DEPLOYMENT.md#5b-windows-client):
-            `hermes-daemon.exe service install`), then use the desktop app or
+            `hermes-daemon.exe service install`, which the installer does for you), then use the desktop app or
             the `hermes` CLI. Verify downloads against `SHA256SUMS`.
 
             **Status:** verified in CI on real network adapters (Linux TAP and

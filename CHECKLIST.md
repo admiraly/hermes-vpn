@@ -127,9 +127,8 @@ Improvements added:
 - [x] **Build & test on Linux.** Whole workspace including the Tauri app
       builds on Linux, `cargo test` passes, and the netns smoke test runs
       the daemon, Unix-socket IPC and TAP adapter for real.
-- [~] **Bundle `wintun.dll`** — the release workflow ships it (checksum-
-      verified) next to `hermes-daemon.exe` in the Windows zip. The MSI/NSIS
-      app installer doesn't include the daemon yet.
+- [x] **Bundle `wintun.dll`** — shipped (checksum-verified) in the Windows
+      zip and in the installer, next to `hermes-daemon.exe`.
 - [x] **Daemon lifecycle / service install.**
       - **Linux:** `packaging/linux/install.sh` installs a hardened systemd
         unit: the daemon runs as the unprivileged `hermes` user with only
@@ -146,16 +145,21 @@ Improvements added:
         remote clients, and claims its name exclusively on the first
         instance (no pipe squatting). Exercised in CI on a real Windows
         runner: install → CLI over the pipe → room traffic → uninstall.
-      - Still open: a one-click installer (MSI/NSIS) wrapping this, and the
-        Tauri app offering to install the service.
+      - **Windows installer:** one NSIS `*-setup.exe` (per-machine) installs the
+        app, daemon, CLI and wintun.dll, registers + starts the service and
+        opens the firewall for the daemon; upgrades and uninstalls clean up.
+        Built from `hermes-ui/src-tauri/tauri.installer.conf.json`,
+        `packaging/windows/`; CI installs, upgrades and uninstalls it on a
+        real runner (`test-installer.ps1`). Not Authenticode-signed. The CLI
+        is in the install folder but not added to `PATH`.
 - [ ] **Real app icons & branding** — replace the generated placeholder
       [icons](hermes-ui/src-tauri/icons) with real artwork; add `.icns` if
       macOS is ever targeted.
 - [x] **Release builds & artifacts** — `.github/workflows/release.yml`:
       push a `v*` tag to build Linux/Windows binaries, deb/AppImage and
-      MSI/NSIS app bundles, and publish them with `SHA256SUMS` as a GitHub
-      Release. Next: one installer per OS that bundles app + daemon and
-      installs the service.
+      deb/AppImage and the Windows installer, and publish them with
+      `SHA256SUMS` as a GitHub Release. Remaining: a Linux installer that
+      bundles app + daemon (the tarball's `install.sh` covers the daemon).
 - [x] **Default manifest URL** is supported: builds read
       `HERMES_DEFAULT_MANIFEST_URL` at compile time and use it when the user
       hasn't set one. Left unset until there is an official fleet to point at.

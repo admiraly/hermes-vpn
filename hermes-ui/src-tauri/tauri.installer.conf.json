@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": {
+      "installer-stage/hermes-daemon.exe": "hermes-daemon.exe",
+      "installer-stage/hermes.exe": "hermes.exe",
+      "installer-stage/wintun.dll": "wintun.dll",
+      "installer-stage/wintun-LICENSE.txt": "wintun-LICENSE.txt",
+      "installer-stage/LICENSE.md": "LICENSE.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "../../packaging/windows/installer-hooks.nsh"
+      }
+    }
+  }
+}

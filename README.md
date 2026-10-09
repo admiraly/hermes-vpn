@@ -75,10 +75,10 @@ Prebuilt binaries are attached to each
 | `hermes-<ver>-linux-x86_64.tar.gz` | Servers, daemon, CLI + `install.sh` / systemd unit |
 | `hermes-<ver>-windows-x86_64.zip` | Servers, daemon, CLI + `wintun.dll` |
 | `*.deb`, `*.AppImage` | Desktop app for Linux |
-| `*.msi`, `*-setup.exe` | Desktop app for Windows |
+| `Hermes_*-setup.exe` | **Windows installer**: app + daemon service + CLI + `wintun.dll` (run as administrator) |
 | `SHA256SUMS` | Checksums for all of the above |
 
-Install the daemon as a service ([DEPLOYMENT.md §5](docs/DEPLOYMENT.md#5-install--run-the-client)),
+On Windows the installer does this for you. Otherwise install the daemon as a service ([DEPLOYMENT.md §5](docs/DEPLOYMENT.md#5-install--run-the-client)),
 then run the desktop app or the `hermes` CLI as yourself.
 
 ## Quick start (development, single machine)

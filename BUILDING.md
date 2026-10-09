@@ -91,3 +91,19 @@ no runtime dependencies beyond glibc. Build with
 `cargo build --release -p hermes-signaling -p hermes-relay` on a Linux
 box (or in CI) and copy `target/release/hermes-{signaling,relay}` to the
 server. See [docs/SERVER-OPERATIONS.md](docs/SERVER-OPERATIONS.md).
+
+## Windows installer
+
+The release installer bundles the app, daemon, CLI and `wintun.dll` and
+registers the service. From the repo root, in PowerShell:
+
+```powershell
+pwsh packaging/windows/stage.ps1                 # builds daemon + CLI, fetches wintun.dll
+cd hermes-ui; npm ci
+npx tauri build --config src-tauri/tauri.installer.conf.json
+# → target\release\bundle\nsis\Hermes_*-setup.exe
+```
+
+`packaging/windows/test-installer.ps1` (elevated) installs it, upgrades over
+it and uninstalls, checking the service, files and firewall rule each time.
+It is what CI runs.

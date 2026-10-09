@@ -109,6 +109,38 @@ jobs:
         shell: pwsh
         run: ./scripts/windows-smoke.ps1
 
+  # Builds the Windows installer and installs it for real: the service must
+  # be registered and running, the files in place, the firewall rule added,
+  # and uninstalling must remove all of it again.
+  windows-installer:
+    name: installer (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: hermes-ui/package-lock.json
+      - name: Stage daemon, CLI and wintun.dll
+        shell: pwsh
+        run: ./packaging/windows/stage.ps1
+      - name: Build installer
+        working-directory: hermes-ui
+        run: |
+          npm ci
+          npx tauri build --config src-tauri/tauri.installer.conf.json
+      - name: Install, check, upgrade, uninstall
+        shell: pwsh
+        run: ./packaging/windows/test-installer.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-installer
+          path: target/release/bundle/nsis/*-setup.exe
+
   # Frontend type-check + bundle. Catches TypeScript and Vite errors and
   # produces the dist/ the Tauri crate embeds.
   frontend:

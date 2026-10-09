@@ -117,7 +117,7 @@ cargo build --release -p hermes-daemon       # → target\release\hermes-daemon.
 cd hermes-ui
 npm install
 npm run build
-npx tauri build       # → src-tauri\target\release\bundle\ (MSI/NSIS installer)
+npx tauri build       # → target\release\bundle\ (plain app; for the full installer see BUILDING.md)
 
 # (Optional) the servers also build on Windows:
 cargo build --release -p hermes-signaling -p hermes-relay
@@ -278,6 +278,17 @@ finds the daemon automatically — the per-user socket first, then the
 system service's.
 
 ### 5b. Windows client
+
+**Easiest:** run `Hermes_<version>_x64-setup.exe` from the release page
+(it asks for administrator rights). It installs the app, the CLI
+(`hermes.exe`, in the install folder) and `wintun.dll`, registers and starts
+the daemon service, and adds a Windows Firewall rule for it. Upgrading is
+just running a newer installer; uninstalling removes the service and the
+rule (your identity and settings in `%ProgramData%\Hermes` are kept). The
+installer is not code-signed, so SmartScreen will warn. You can skip the
+manual steps below.
+
+*Manual route (zip):*
 
 1. **Get `wintun.dll`**: download from <https://www.wintun.net>, take the
    `amd64` build, and place `wintun.dll` **next to `hermes-daemon.exe`**.
