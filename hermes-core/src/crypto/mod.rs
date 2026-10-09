@@ -8,5 +8,5 @@
 pub mod identity;
 pub mod mac;
 
-pub use identity::{NodeId, NodeIdentity, NodeSecret};
+pub use identity::{verify_wireguard_binding, NodeId, NodeIdentity, NodeSecret};
 pub use mac::{VirtualIpv4, VirtualMac};

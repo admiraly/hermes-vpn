@@ -40,6 +40,7 @@ use crate::error::Result;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod mock;
 #[cfg(windows)]
 pub mod windows;
 
@@ -83,6 +84,32 @@ pub const FRAME_BUFFER_SIZE: usize = VIRTUAL_MTU + ETHERNET_HEADER;
 /// oversized packet from a misconfigured peer is read whole (and then
 /// rejected) rather than silently truncated.
 pub const DATAGRAM_BUFFER_SIZE: usize = 2048;
+
+/// Creates the adapter when a room is entered. The engine's default makes
+/// the real OS adapter ([`PlatformAdapter`]); tests and headless embedders
+/// supply their own (see [`mock::MockAdapter`]).
+pub type AdapterFactory = std::sync::Arc<
+    dyn Fn(
+            AdapterConfig,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<std::sync::Arc<dyn VirtualAdapter>>> + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+/// The default [`AdapterFactory`]: the real adapter for this platform.
+#[must_use]
+pub fn platform_adapter_factory() -> AdapterFactory {
+    std::sync::Arc::new(|config| {
+        Box::pin(async move {
+            let adapter: std::sync::Arc<dyn VirtualAdapter> =
+                std::sync::Arc::new(PlatformAdapter::create(config).await?);
+            Ok(adapter)
+        })
+    })
+}
 
 /// Which layer an adapter speaks natively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

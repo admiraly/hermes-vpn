@@ -46,6 +46,7 @@ use crate::mesh::Mesh;
 use crate::nat::Candidate;
 use crate::room::{InviteCode, Room, RoomMode};
 use crate::signaling::{ClientMessage, SignalingClient};
+use crate::tap::AdapterFactory;
 
 /// First reconnect delay; doubles per attempt up to [`RECONNECT_MAX_DELAY`].
 const RECONNECT_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -66,6 +67,14 @@ pub struct EngineConfig {
     pub bind_addr: SocketAddr,
     /// STUN server for reflexive-address discovery.
     pub stun_server: String,
+    /// Ask the home router for a UPnP port mapping (on by default; turn it
+    /// off on networks where opening router ports isn't wanted).
+    #[serde(default = "default_true")]
+    pub upnp: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for EngineConfig {
@@ -79,6 +88,7 @@ impl Default for EngineConfig {
             alias: default_alias(),
             bind_addr: "0.0.0.0:0".parse().unwrap(),
             stun_server: crate::nat::stun::DEFAULT_STUN_SERVER.to_string(),
+            upnp: true,
         }
     }
 }
@@ -121,6 +131,21 @@ pub fn normalize_alias(alias: &str) -> std::result::Result<String, String> {
     Ok(alias.to_string())
 }
 
+/// Create `path` readable by its owner only — from the moment it exists,
+/// not after a later `chmod` — and write `contents` to it. Refuses to
+/// overwrite an existing file.
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(contents)
+}
+
 /// The long-lived network stack: one UDP socket (bound once, so tunnels
 /// and relay sessions keep their port across signaling reconnects), the
 /// MAC router, and the mesh.
@@ -147,6 +172,8 @@ struct SessionCtx {
     generation: Arc<AtomicU64>,
     my_generation: u64,
     stun_server: String,
+    upnp_enabled: bool,
+    adapter_factory: AdapterFactory,
     upnp: Arc<UpnpSlot>,
 }
 
@@ -174,6 +201,8 @@ async fn establish(ctx: &SessionCtx) -> Result<SignalingClient> {
         invite: ctx.invite.clone(),
         cached_candidates: ctx.cached_candidates.clone(),
         stun_server: ctx.stun_server.clone(),
+        upnp_enabled: ctx.upnp_enabled,
+        adapter_factory: ctx.adapter_factory.clone(),
         upnp: ctx.upnp.clone(),
     });
     let handle = engine_pump::spawn(state.clone(), inbox);
@@ -266,6 +295,8 @@ pub struct HermesEngine {
     signaling_url: RwLock<Option<String>>,
     /// Our UPnP port mapping (lives as long as the UDP socket).
     upnp: Arc<UpnpSlot>,
+    /// Creates the virtual adapter on room entry.
+    adapter_factory: AdapterFactory,
     /// Current display name (saved alias, else the configured default).
     alias: RwLock<String>,
 }
@@ -282,21 +313,12 @@ impl HermesEngine {
 
         let secret = if identity_path.exists() {
             let bytes = std::fs::read(&identity_path)?;
-            bincode::deserialize::<NodeSecret>(&bytes)
-                .map_err(|e| HermesError::Crypto(format!("load identity: {e}")))?
+            NodeSecret::from_bytes(&bytes).map_err(|e| {
+                HermesError::Crypto(format!("load {}: {e}", identity_path.display()))
+            })?
         } else {
             let s = NodeSecret::generate();
-            let bytes = bincode::serialize(&s)
-                .map_err(|e| HermesError::Crypto(format!("save identity: {e}")))?;
-            std::fs::write(&identity_path, &bytes)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &identity_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
-            }
+            write_private_file(&identity_path, &s.to_bytes())?;
             s
         };
 
@@ -325,8 +347,18 @@ impl HermesEngine {
             events_tx,
             signaling_url: RwLock::new(None),
             upnp: Arc::new(parking_lot::Mutex::new(None)),
+            adapter_factory: crate::tap::platform_adapter_factory(),
             alias: RwLock::new(alias),
         })
+    }
+
+    /// Use `factory` instead of the OS adapter when entering rooms — for
+    /// tests (see [`crate::tap::mock::MockAdapter`]) and headless embedding.
+    /// Call before connecting.
+    #[must_use]
+    pub fn with_adapter_factory(mut self, factory: AdapterFactory) -> Self {
+        self.adapter_factory = factory;
+        self
     }
 
     /// Our identity.
@@ -390,6 +422,8 @@ impl HermesEngine {
             generation: self.generation.clone(),
             my_generation,
             stun_server: self.config.stun_server.clone(),
+            upnp_enabled: self.config.upnp,
+            adapter_factory: self.adapter_factory.clone(),
             upnp: self.upnp.clone(),
         };
 
@@ -625,6 +659,39 @@ impl Drop for HermesEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_identity_file_is_private_and_reloads() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hermes-id-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let config = EngineConfig {
+            data_dir: dir.clone(),
+            ..EngineConfig::default()
+        };
+        let first = HermesEngine::new(config.clone())
+            .unwrap()
+            .identity()
+            .node_id;
+        let file = dir.join("identity.key");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 32);
+        assert_eq!(
+            HermesEngine::new(config.clone())
+                .unwrap()
+                .identity()
+                .node_id,
+            first
+        );
+        // A damaged file is an error, never silently replaced by a new identity.
+        std::fs::write(&file, b"short").unwrap();
+        assert!(HermesEngine::new(config).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn alias_validation() {

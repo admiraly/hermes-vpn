@@ -84,14 +84,39 @@ impl fmt::Display for NodeId {
 
 /// Private half of a node identity. Never leaves the local machine.
 ///
-/// Serialized form is a bincode-encoded Ed25519 seed. The X25519 secret
-/// used for WireGuard is derived via BLAKE3 rather than stored separately.
+/// Stored as the bare 32-byte Ed25519 seed (see [`NodeSecret::to_bytes`]).
+/// The X25519 secret used for WireGuard is derived via BLAKE3 rather than
+/// stored separately.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSecret {
     ed25519_seed: [u8; 32],
 }
 
 impl NodeSecret {
+    /// The seed as stored on disk: exactly 32 raw bytes.
+    ///
+    /// (Earlier versions wrote the same bytes via `bincode`, which encodes
+    /// a fixed-size array without any framing — so existing `identity.key`
+    /// files load unchanged.)
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.ed25519_seed
+    }
+
+    /// Load a seed written by [`Self::to_bytes`].
+    ///
+    /// # Errors
+    /// Fails unless `bytes` is exactly 32 bytes long.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let ed25519_seed: [u8; 32] = bytes.try_into().map_err(|_| {
+            HermesError::Crypto(format!(
+                "identity file must be 32 bytes, found {}",
+                bytes.len()
+            ))
+        })?;
+        Ok(Self { ed25519_seed })
+    }
+
     /// Generate a fresh, cryptographically random node identity.
     pub fn generate() -> Self {
         let signing = SigningKey::generate(&mut OsRng);
@@ -104,6 +129,20 @@ impl NodeSecret {
     #[must_use]
     pub fn signing_key(&self) -> SigningKey {
         SigningKey::from_bytes(&self.ed25519_seed)
+    }
+
+    /// Sign "this WireGuard key is mine" (see [`verify_wireguard_binding`]).
+    #[must_use]
+    pub fn sign_wireguard_binding(&self) -> Vec<u8> {
+        use ed25519_dalek::Signer;
+        let identity = self.public();
+        self.signing_key()
+            .sign(&wg_binding_message(
+                &identity.node_id,
+                &identity.wireguard_public,
+            ))
+            .to_bytes()
+            .to_vec()
     }
 
     /// The X25519 static secret used for WireGuard handshakes.
@@ -141,6 +180,44 @@ impl fmt::Debug for NodeSecret {
     }
 }
 
+/// Domain separator for [`NodeSecret::sign_wireguard_binding`].
+const WG_BINDING_CONTEXT: &[u8] = b"hermes-wireguard-binding-v1";
+
+fn wg_binding_message(node_id: &NodeId, wireguard_public: &[u8; 32]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(WG_BINDING_CONTEXT.len() + 64);
+    msg.extend_from_slice(WG_BINDING_CONTEXT);
+    msg.extend_from_slice(&node_id.0);
+    msg.extend_from_slice(wireguard_public);
+    msg
+}
+
+/// Check that `node_id` vouches for `wireguard_public`: `signature` must be
+/// the node's Ed25519 signature from [`NodeSecret::sign_wireguard_binding`].
+///
+/// A node's WireGuard key is *derived* from its identity seed, but nobody
+/// else can recompute that derivation (it needs the secret), so peers
+/// would otherwise have to take whatever key the signaling server hands
+/// them on trust — and a hostile server could substitute its own and sit
+/// in the middle of the "end-to-end" tunnel. This signature closes that
+/// gap: only the holder of the identity key can produce it, and the
+/// server can relay it but not forge it.
+#[must_use]
+pub fn verify_wireguard_binding(
+    node_id: &NodeId,
+    wireguard_public: &[u8; 32],
+    signature: &[u8],
+) -> bool {
+    use ed25519_dalek::{Signature, Verifier};
+    let Ok(key) = VerifyingKey::from_bytes(&node_id.0) else {
+        return false;
+    };
+    let Ok(sig) = Signature::from_slice(signature) else {
+        return false;
+    };
+    key.verify(&wg_binding_message(node_id, wireguard_public), &sig)
+        .is_ok()
+}
+
 /// Public identity of a node: what you advertise to peers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeIdentity {
@@ -167,6 +244,67 @@ mod tests {
         let wg1 = XPublicKey::from(&s.wireguard_secret());
         let wg2 = XPublicKey::from(&s.wireguard_secret());
         assert_eq!(wg1.as_bytes(), wg2.as_bytes());
+    }
+
+    #[test]
+    fn wireguard_binding_accepts_only_the_owner_and_the_right_key() {
+        let (alice, mallory) = (NodeSecret::generate(), NodeSecret::generate());
+        let a = alice.public();
+        let sig = alice.sign_wireguard_binding();
+        assert!(verify_wireguard_binding(
+            &a.node_id,
+            &a.wireguard_public,
+            &sig
+        ));
+
+        // A substituted key (what a hostile signaling server would try).
+        let m = mallory.public();
+        assert!(!verify_wireguard_binding(
+            &a.node_id,
+            &m.wireguard_public,
+            &sig
+        ));
+        // Someone else's signature over someone else's key, under Alice's id.
+        let forged = mallory.sign_wireguard_binding();
+        assert!(!verify_wireguard_binding(
+            &a.node_id,
+            &m.wireguard_public,
+            &forged
+        ));
+        // Garbage / empty / truncated.
+        assert!(!verify_wireguard_binding(
+            &a.node_id,
+            &a.wireguard_public,
+            &[]
+        ));
+        assert!(!verify_wireguard_binding(
+            &a.node_id,
+            &a.wireguard_public,
+            &sig[..63]
+        ));
+        // Context separation: a relay-registration signature isn't a binding.
+        assert!(!verify_wireguard_binding(
+            &a.node_id,
+            &a.wireguard_public,
+            &[0u8; 64]
+        ));
+    }
+
+    #[test]
+    fn seed_bytes_roundtrip_and_validation() {
+        let s = NodeSecret::generate();
+        let loaded = NodeSecret::from_bytes(&s.to_bytes()).unwrap();
+        assert_eq!(loaded.public().node_id, s.public().node_id);
+        assert!(NodeSecret::from_bytes(&[0u8; 31]).is_err());
+        assert!(NodeSecret::from_bytes(&[0u8; 33]).is_err());
+    }
+
+    #[test]
+    fn legacy_bincode_identity_files_load_unchanged() {
+        // Version <= 0.2 stored `bincode::serialize(&NodeSecret)`; for a
+        // struct holding one [u8; 32] that is the bare 32 bytes.
+        let legacy = [7u8; 32];
+        assert_eq!(NodeSecret::from_bytes(&legacy).unwrap().to_bytes(), legacy);
     }
 
     #[test]

@@ -138,6 +138,7 @@ async fn add_peer(
     relay: SocketAddr,
     peer: &PeerInfo,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(peer.key_binding_is_valid(), "peer key binding invalid");
     mesh.router.register(
         VirtualMac::from_node_id(&peer.node_id),
         VirtualIpv4::from_node_id_salted(&peer.node_id, [10, 42], peer.ip_salt),

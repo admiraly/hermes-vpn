@@ -119,6 +119,21 @@ The virtual MTU is **1340** so a full-size frame survives all of the
 above plus UDP/IP inside a standard 1500-byte path without
 fragmentation.
 
+## Key authenticity
+
+A peer's WireGuard public key reaches you through the signaling server, so
+the server must not be able to substitute one. A node's WireGuard key is
+*derived* from its Ed25519 identity seed, but nobody else can recompute
+that derivation, so authenticity needs an explicit proof: in `Hello`, each
+node sends `wireguard_binding` = Ed25519 signature over
+`"hermes-wireguard-binding-v1" ‖ node_id ‖ wireguard_public`. The server
+checks it on arrival (to keep junk out) and relays it in `PeerInfo`; **the
+receiving client verifies it again** and refuses to build a tunnel for any
+peer whose key its own identity doesn't vouch for (event `bad_peer_key`).
+The server can pass the proof along but cannot forge it. It does *not* make
+the server untrusted for admission — see
+[THREAT-MODEL.md](THREAT-MODEL.md).
+
 ## Virtual addressing
 
 A member's virtual MAC and IPv4 are derived from its node id (BLAKE3), so
@@ -173,7 +188,8 @@ and three mechanisms make that safe:
 
 ## Protocol versions
 
-- Signaling protocol: **v2** (room modes + relay assignment).
+- Signaling protocol: **v3** (v2 added room modes + relay assignment; v3
+  adds the signed WireGuard key binding below).
 - Daemon IPC: **v2** (room modes + server directory commands).
 
 Both reject mismatched peers explicitly at handshake time.

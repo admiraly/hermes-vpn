@@ -4,9 +4,11 @@
 //! in three dash-separated groups: `K7QF-M2XA-9RTB`. The first 11
 //! characters are random (55 bits — far too many to enumerate against a
 //! rate-limited signaling server); the 12th is a Luhn mod 32 check
-//! character, so any single mistyped character and almost every swap of
-//! two adjacent characters is caught locally before the code is ever
-//! sent to the server.
+//! character, so any single mistyped character and every swap of two
+//! adjacent characters but one (`A`↔`9`, the values 0 and 31 — the known
+//! blind spot of Luhn mod N) is caught locally before the code is ever
+//! sent to the server. The check is a typo aid, not a security feature:
+//! secrecy rests on the 55 random bits, and the server rate-limits guesses.
 //!
 //! The alphabet drops `I`, `O`, `0` and `1`, the glyphs people confuse
 //! when reading a code aloud or copying it off a screen. Parsing is
@@ -176,6 +178,40 @@ mod tests {
                 assert!(!InviteCode::is_valid(&bad), "missed substitution at {pos}");
             }
         }
+    }
+
+    #[test]
+    fn adjacent_swaps_are_detected_except_the_known_blind_spot() {
+        // Exhaustive over symbol pairs and positions for a fixed prefix.
+        let mut undetected = Vec::new();
+        for seed in 0..50u8 {
+            let mut values = [0u8; CODE_LEN];
+            for (i, v) in values[..PAYLOAD_LEN].iter_mut().enumerate() {
+                *v = seed
+                    .wrapping_mul(7)
+                    .wrapping_add(u8::try_from(i * 5).unwrap())
+                    % 32;
+            }
+            values[PAYLOAD_LEN] = luhn_check(&values[..PAYLOAD_LEN]);
+            for pos in 0..CODE_LEN - 1 {
+                if values[pos] == values[pos + 1] {
+                    continue;
+                }
+                let mut swapped = values;
+                swapped.swap(pos, pos + 1);
+                if InviteCode::is_valid(&swapped) {
+                    let pair = (
+                        values[pos].min(values[pos + 1]),
+                        values[pos].max(values[pos + 1]),
+                    );
+                    undetected.push(pair);
+                }
+            }
+        }
+        assert!(
+            undetected.iter().all(|&pair| pair == (0, 31)),
+            "only the A<->9 swap may slip through, got {undetected:?}"
+        );
     }
 
     #[test]

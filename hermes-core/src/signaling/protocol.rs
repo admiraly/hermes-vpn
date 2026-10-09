@@ -26,6 +26,11 @@ pub enum ClientMessage {
         wireguard_public: [u8; 32],
         /// Ed25519 signature of the server-provided challenge nonce.
         signature: Vec<u8>,
+        /// Ed25519 signature binding `wireguard_public` to `node_id` (see
+        /// `crypto::verify_wireguard_binding`). Peers verify it themselves,
+        /// so the server relaying it cannot swap in a different key.
+        #[serde(default)]
+        wireguard_binding: Vec<u8>,
         /// Human-visible alias.
         alias: String,
         /// Protocol version the client speaks.
@@ -156,6 +161,19 @@ pub enum ServerMessage {
     Pong,
 }
 
+impl PeerInfo {
+    /// Does the peer's own signature vouch for the WireGuard key we were
+    /// given? Peers failing this must not get a tunnel.
+    #[must_use]
+    pub fn key_binding_is_valid(&self) -> bool {
+        crate::crypto::verify_wireguard_binding(
+            &self.node_id,
+            &self.wireguard_public,
+            &self.wireguard_binding,
+        )
+    }
+}
+
 /// Publicly visible information about a peer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -163,6 +181,12 @@ pub struct PeerInfo {
     pub node_id: NodeId,
     /// Their WireGuard public key (X25519).
     pub wireguard_public: [u8; 32],
+    /// The peer's own signature vouching for `wireguard_public`. Recipients
+    /// must check it (`crypto::verify_wireguard_binding`) before building a
+    /// tunnel: it is what stops the signaling server from substituting its
+    /// own key and sitting in the middle.
+    #[serde(default)]
+    pub wireguard_binding: Vec<u8>,
     /// Self-chosen display name.
     pub alias: String,
     /// Which address in the peer's derivation sequence it uses in this

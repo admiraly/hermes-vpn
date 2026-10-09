@@ -69,6 +69,7 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                 node_id,
                 wireguard_public,
                 signature,
+                wireguard_binding,
                 alias,
                 protocol_version,
             }) => {
@@ -87,13 +88,19 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
                         .await;
                     return;
                 }
-                (node_id, wireguard_public, signature, alias)
+                (
+                    node_id,
+                    wireguard_public,
+                    signature,
+                    wireguard_binding,
+                    alias,
+                )
             }
             _ => return,
         },
         _ => return,
     };
-    let (node_id, wireguard_public, signature, alias) = hello;
+    let (node_id, wireguard_public, signature, wireguard_binding, alias) = hello;
 
     // Verify the Ed25519 signature over the nonce.
     let verifying = match VerifyingKey::from_bytes(&node_id.0) {
@@ -120,6 +127,26 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
         return;
     }
 
+    // The node must also vouch for the WireGuard key it advertises. Peers
+    // re-check this themselves (that is what makes it trustworthy — we
+    // only relay it), but refusing a bad one here keeps junk out of rooms.
+    if !hermes_core::crypto::verify_wireguard_binding(
+        &node_id,
+        &wireguard_public,
+        &wireguard_binding,
+    ) {
+        let _ = ws_tx
+            .send(Message::Text(
+                serde_json::to_string(&ServerMessage::Error {
+                    code: "bad_key_binding".into(),
+                    message: "wireguard_binding does not match node_id and wireguard_public".into(),
+                })
+                .unwrap(),
+            ))
+            .await;
+        return;
+    }
+
     // Auth OK. Issue Welcome.
     let session_id = Uuid::new_v4().to_string();
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<ServerMessage>(64);
@@ -130,17 +157,12 @@ async fn run_session(socket: WebSocket, app: AppState, ip: IpAddr) {
         .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
         .await;
 
-    // The WireGuard public key the client advertised in its Hello. We
-    // accept this as-is; it's derived client-side from the Ed25519
-    // identity so any mismatch only harms the misbehaving client (they
-    // won't be able to complete a handshake with their own peers).
-    let _ = wireguard_public; // captured into Session below
-
     let session = Arc::new(Session {
         session_id,
         node_id,
         alias,
         wireguard_public,
+        wireguard_binding,
         outgoing: outgoing_tx,
         ip_salt: std::sync::atomic::AtomicU32::new(0),
     });

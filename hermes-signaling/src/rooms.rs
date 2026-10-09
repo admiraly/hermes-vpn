@@ -23,6 +23,8 @@ pub struct Session {
     pub node_id: hermes_core::crypto::NodeId,
     pub alias: String,
     pub wireguard_public: [u8; 32],
+    /// The node's signed key binding, relayed to peers verbatim.
+    pub wireguard_binding: Vec<u8>,
     pub outgoing: mpsc::Sender<ServerMessage>,
     /// IP salt in the session's current room (see `insert_member`).
     pub ip_salt: AtomicU32,
@@ -34,6 +36,7 @@ impl Session {
         PeerInfo {
             node_id: self.node_id,
             wireguard_public: self.wireguard_public,
+            wireguard_binding: self.wireguard_binding.clone(),
             alias: self.alias.clone(),
             ip_salt: self.ip_salt.load(Ordering::Relaxed),
         }
@@ -215,6 +218,7 @@ mod tests {
             node_id,
             alias: String::new(),
             wireguard_public: [0; 32],
+            wireguard_binding: Vec::new(),
             outgoing,
             ip_salt: AtomicU32::new(0),
         })

@@ -169,6 +169,7 @@ impl SignalingClient {
             node_id: identity.node_id,
             wireguard_public: identity.wireguard_public,
             signature,
+            wireguard_binding: secret.sign_wireguard_binding(),
             alias,
             protocol_version: crate::PROTOCOL_VERSION,
         };

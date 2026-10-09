@@ -39,7 +39,7 @@ use crate::relay::{self, RegistrationConfig};
 use crate::room::{InviteCode, PeerRecord, PeerStatus, Room, RoomId, RoomMode};
 use crate::signaling::protocol::{ClientMessage, PeerInfo, RoomRestore, ServerMessage};
 use crate::signaling::SignalingClient;
-use crate::tap::{AdapterConfig, PlatformAdapter, VirtualAdapter, VIRTUAL_MTU};
+use crate::tap::{AdapterConfig, AdapterFactory, VirtualAdapter, VIRTUAL_MTU};
 use crate::tunnel::{PeerPath, PeerTunnel};
 
 /// Every room's virtual subnet: 10.42.0.0/16.
@@ -167,6 +167,10 @@ pub(crate) struct PumpState {
     pub cached_candidates: Arc<tokio::sync::Mutex<Option<Vec<Candidate>>>>,
     /// STUN server (`host:port`) used to learn our reflexive address.
     pub stun_server: String,
+    /// Whether to ask the router for a UPnP port mapping.
+    pub upnp_enabled: bool,
+    /// Creates the virtual adapter when we enter a room.
+    pub adapter_factory: AdapterFactory,
     /// Our UPnP port mapping, if we made one (engine-lifetime, renewed in
     /// the background, removed on shutdown).
     pub upnp: Arc<UpnpSlot>,
@@ -487,8 +491,7 @@ async fn enter_room(
 
         // Bring up the adapter. Failure here is fatal for the room but not
         // the engine overall.
-        let adapter: Arc<dyn VirtualAdapter> =
-            Arc::new(PlatformAdapter::create(adapter_cfg).await?);
+        let adapter: Arc<dyn VirtualAdapter> = (state.adapter_factory)(adapter_cfg).await?;
 
         // Spawn the driver that pumps frames between TAP and mesh.
         let handle = mesh::spawn_driver(state.mesh.clone(), adapter);
@@ -508,6 +511,26 @@ async fn enter_room(
 /// block the rest of the pump.
 async fn on_peer_joined(state: &Arc<PumpState>, peer: PeerInfo) -> Result<()> {
     info!(node = %peer.node_id.short(), alias = %peer.alias, "peer joined");
+
+    // The WireGuard key we were handed must be vouched for by the peer's
+    // own identity key. Otherwise the signaling server (or anything
+    // between us and it) could swap in its own key and read the "end-to-end
+    // encrypted" tunnel. No valid binding, no tunnel.
+    if !peer.key_binding_is_valid() {
+        warn!(node = %peer.node_id.short(), "peer's WireGuard key is not vouched for by its identity — ignoring it");
+        let _ = state
+            .events
+            .send(EngineEvent::SignalingError {
+                code: "bad_peer_key".into(),
+                message: format!(
+                    "ignored {}: the server supplied a WireGuard key their identity doesn't vouch for \
+                     (a faulty or malicious signaling server, or an outdated client)",
+                    peer.alias
+                ),
+            })
+            .await;
+        return Ok(());
+    }
 
     let Some(room) = state.current_room() else {
         warn!("PeerJoined before room entered — dropping");
@@ -675,7 +698,7 @@ async fn get_or_gather_candidates(state: &Arc<PumpState>) -> Vec<Candidate> {
         .as_ref()
         .map(|l| std::net::SocketAddr::V4(l.mapping.external));
     let upnp = async {
-        if existing.is_some() {
+        if existing.is_some() || !state.upnp_enabled {
             return existing;
         }
         let Some(std::net::SocketAddr::V4(v4)) = host else {

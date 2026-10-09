@@ -18,7 +18,7 @@ whole again:
       `Mesh`, crate manifests, the relay server loop, `Cargo.lock`, and
       the UI build files (package.json, Vite/TS config, Tauri
       capabilities, placeholder icons)
-- [x] 78 tests pass on Linux and Windows, warning-free under `-D warnings`; the
+- [x] 88 tests pass on Linux and Windows, warning-free under `-D warnings`; the
       Tauri app builds on Linux
 - [x] **Real-adapter smoke test**: `scripts/netns-smoke.sh` runs two
       daemons with kernel TAP adapters in separate network namespaces.
@@ -236,13 +236,38 @@ Improvements added:
       `HERMES_SIGNALING_TRUST_PROXY=1` so the client IP comes from
       `X-Forwarded-For` (rightmost hop) instead of the proxy's address.
       A rate-limited automatic re-join retries after 5–10 s.
-- [ ] **Relay source-binding note.** `DATA` sender identity comes from UDP
-      source address; document the E2E-encryption mitigation and consider
-      binding sessions more tightly.
-- [ ] Run `cargo audit` / dependency review; pin and review the crypto
-      stack (`boringtun`, `ed25519-dalek`, `x25519-dalek`).
-- [ ] Independent review of the relay replay-protection and the invite-code
-      checksum.
+- [x] **Relay source-binding / threat model** documented in
+      [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md): sender identity from the
+      UDP source address (spoofing costs bandwidth, never integrity — the
+      receiver's WireGuard rejects it), the REGISTER replay window after a
+      relay restart, no amplification. Also [SECURITY.md](SECURITY.md) for
+      private vulnerability reports.
+- [x] **WireGuard keys are bound to node identity** (found by tracing what a
+      hostile signaling server could do): the server could substitute a
+      peer's WireGuard key and man-in-the-middle the "end-to-end" tunnel.
+      Nodes now sign `(node_id, wireguard_public)`; peers verify it
+      themselves and refuse unvouched keys (`bad_peer_key`). Protocol v3.
+      Tested against a hostile in-test server — and the tests fail with the
+      check disabled.
+- [x] **`cargo audit`** runs in CI on lockfile changes and weekly
+      (`.github/workflows/audit.yml`, `--deny warnings`). Fixed
+      RUSTSEC-2026-0258 (h2, via igd-next → 0.18, which also hardens UPnP
+      discovery against redirects); dropped the unmaintained `bincode`.
+      Two unfixable GTK/Tauri warnings are ignored with reasons in
+      `.cargo/audit.toml`. Identity key files are now created 0600 from the
+      start (no chmod race).
+- [~] **Independent review** of relay replay protection, key binding and
+      invite codes. My own adversarial pass is in the threat model (e.g. the
+      invite checksum misses exactly one adjacent swap, `A`↔`9`); outside
+      eyes are still wanted.
+- [ ] **Cryptographic room admission.** The signaling server enforces who is
+      in a room, so a malicious one can add itself as a member. Derive a room
+      secret from the invite code and have members prove knowledge of it to
+      each other (also the basis for revocable codes / kick-ban below).
+- [ ] **Restrict who may control the Windows daemon** (today: any
+      authenticated local user; remote clients are refused).
+- [ ] **Sign releases** (minisign/cosign) and Authenticode-sign the Windows
+      installers.
 
 ## P4 — UX / UI polish
 
@@ -290,8 +315,13 @@ Improvements added:
       ([.github/workflows/ci.yml](.github/workflows/ci.yml)). Builds use
       `--locked`; `RUSTFLAGS=-D warnings` gates the workspace (deps are
       lint-capped). The tree is fmt-clean and rustc-warning-clean.
-- [ ] **Driver-loop test** with a mock `VirtualAdapter` (no real TAP) to
-      cover the full TAP↔mesh path without privileges.
+- [x] **Driver-loop tests with a mock adapter.** `HermesEngine` takes an
+      adapter factory (`with_adapter_factory`); `tap::mock::MockAdapter`
+      runs in either Ethernet (Linux TAP) or IP (wintun) mode.
+      `hermes-signaling/tests/engine_e2e.rs` runs two whole engines through
+      the real signaling binary — one posing as Linux, one as Windows — and
+      checks unicast both ways, ARP answered by the shim, and broadcast,
+      without privileges, on every CI platform.
 - [ ] **Frame-parser fuzzing** for the relay protocol, framing, ARP, and
       classifier parsers.
 - [x] **P2P ICE path test** — `hermes-core/tests/p2p_e2e.rs`: two meshes

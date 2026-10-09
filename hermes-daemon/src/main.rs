@@ -17,7 +17,7 @@
 //! ```
 //!
 //! Overrides: `HERMES_DATA_DIR` (state directory), `HERMES_SOCKET` (Unix
-//! socket path).
+//! socket path), `HERMES_UPNP=0` (don't request router port mappings).
 
 #[cfg(windows)]
 mod windows_service;
@@ -68,6 +68,10 @@ fn run_foreground(system: bool) -> anyhow::Result<()> {
 /// Engine configuration for this run mode.
 pub(crate) fn engine_config(system: bool) -> EngineConfig {
     let mut config = EngineConfig::default();
+    // HERMES_UPNP=0 keeps the daemon from asking the router for port mappings.
+    if std::env::var("HERMES_UPNP").is_ok_and(|v| v == "0" || v.eq_ignore_ascii_case("false")) {
+        config.upnp = false;
+    }
     if let Some(dir) = std::env::var_os("HERMES_DATA_DIR").filter(|d| !d.is_empty()) {
         config.data_dir = PathBuf::from(dir);
     } else if system {

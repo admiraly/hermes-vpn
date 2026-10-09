@@ -97,12 +97,12 @@ pub async fn map_udp_port(
             "UPnP needs a concrete local address".into(),
         ));
     }
-    let gateway = search_gateway(SearchOptions {
-        timeout: Some(SEARCH_TIMEOUT),
-        ..SearchOptions::default()
-    })
-    .await
-    .map_err(|e| HermesError::Nat(format!("UPnP gateway search: {e}")))?;
+    // `SearchOptions` is non-exhaustive; mutate the default.
+    let mut options = SearchOptions::default();
+    options.timeout = Some(SEARCH_TIMEOUT);
+    let gateway = search_gateway(options)
+        .await
+        .map_err(|e| HermesError::Nat(format!("UPnP gateway search: {e}")))?;
 
     let external_ip = match gateway
         .get_external_ip()

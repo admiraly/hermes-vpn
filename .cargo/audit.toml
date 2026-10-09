@@ -1,0 +1,13 @@
+# Settings for `cargo audit` (run in CI by .github/workflows/audit.yml).
+# Anything not listed here fails the build, so new advisories get noticed.
+
+[advisories]
+ignore = [
+    # glib 0.18 `VariantStrIter` unsoundness. glib comes in only through
+    # Tauri's GTK3 bindings (Linux desktop app); Hermes never calls the
+    # affected API, and the fix needs Tauri to move to GTK4 bindings.
+    "RUSTSEC-2024-0429",
+    # proc-macro-error is unmaintained: a build-time dependency of GTK's
+    # macro crates, pulled in by Tauri. Not in any shipped runtime path.
+    "RUSTSEC-2024-0370",
+]

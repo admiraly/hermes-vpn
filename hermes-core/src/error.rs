@@ -67,9 +67,3 @@ impl From<serde_json::Error> for HermesError {
         Self::Serialization(e.to_string())
     }
 }
-
-impl From<bincode::Error> for HermesError {
-    fn from(e: bincode::Error) -> Self {
-        Self::Serialization(e.to_string())
-    }
-}

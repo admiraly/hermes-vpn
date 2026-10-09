@@ -118,7 +118,7 @@ public server fleet and the directory manifest.
 ## Project status
 
 The tree was reconstructed after a data loss (see the git history) and is
-whole again: every crate builds warning-free, **78 automated tests pass**
+whole again: every crate builds warning-free, **88 automated tests pass**
 (unit tests plus end-to-end suites that drive the real relay and signaling
 binaries — including a full WireGuard handshake through the relay, ICE
 hole punching between two meshes, endpoint roaming, and auto-reconnect),
@@ -140,18 +140,27 @@ runs both smoke tests. Open work and the roadmap live in
 
 ## Security model
 
+Full analysis, including what Hermes does **not** protect, in
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). In short:
+
 - Each install holds a permanent **Ed25519 keypair**; the private key
-  never leaves the device. The WireGuard X25519 key is derived from it.
-- Room access requires a 12-character checksummed invite code shared
-  out-of-band.
-- The signaling server authenticates every connection with a signed
-  challenge; it cannot impersonate peers or forge room membership.
-- Relay registrations are Ed25519-signed with strictly-increasing
-  timestamps, so captured packets cannot hijack a session.
-- Relays and signaling servers see metadata only — never plaintext.
-- Both servers rate-limit per client IP (connections, room joins — which
-  caps invite-code guessing — and relay registrations), and clients warn
-  when signaling runs over plaintext `ws://` to a remote host.
+  never leaves the device. The WireGuard X25519 key is derived from it, and
+  each node **signs a binding of that key to its identity** which peers
+  verify themselves — so a hostile signaling server cannot swap in its own
+  key and read a tunnel.
+- Traffic between members is end-to-end **WireGuard**. Relays and signaling
+  servers see metadata (who, where, when, how much) — never payloads.
+- Room access requires a 12-character invite code (55 random bits)
+  shared out-of-band; servers rate-limit guesses per client IP. **The
+  signaling server enforces admission**: a malicious one can add itself to a
+  room it hosts (cryptographic admission is on the roadmap).
+- Relay registrations are Ed25519-signed with strictly increasing
+  timestamps; clients warn when signaling runs over plaintext `ws://`.
+- Treat every room member like someone on the same Ethernet switch.
+- Dependencies are audited in CI (`cargo audit`); releases ship checksums
+  but are not yet signed.
+
+Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 
 ## License
 
