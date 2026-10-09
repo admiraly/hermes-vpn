@@ -156,8 +156,9 @@ Improvements added:
       MSI/NSIS app bundles, and publish them with `SHA256SUMS` as a GitHub
       Release. Next: one installer per OS that bundles app + daemon and
       installs the service.
-- [ ] **Set a default manifest URL** in distributed builds so the official
-      fleet appears out of the box.
+- [x] **Default manifest URL** is supported: builds read
+      `HERMES_DEFAULT_MANIFEST_URL` at compile time and use it when the user
+      hasn't set one. Left unset until there is an official fleet to point at.
 - [x] `rust-toolchain.toml` pins the toolchain (1.97.0).
 
 ## P2 — resilience

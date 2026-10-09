@@ -124,7 +124,7 @@ feature. Codes live as long as the room has members.
 - **Server list.** Clients can fetch an operator-hosted JSON manifest of
   servers. Whoever controls that URL controls which signaling servers a
   client is pointed at (and so inherits the "malicious signaling server"
-  row above). The default manifest URL is empty.
+  row above). The default manifest URL is empty unless a build sets `HERMES_DEFAULT_MANIFEST_URL`.
 
 ### Supply chain
 - `Cargo.lock` is committed and CI builds with `--locked`; `cargo audit`

@@ -23,6 +23,13 @@ use tracing::{info, warn};
 
 use crate::error::{HermesError, Result};
 
+/// Manifest URL baked in at build time (`HERMES_DEFAULT_MANIFEST_URL`), used
+/// when the user hasn't configured one. Empty/unset in ordinary builds.
+const DEFAULT_MANIFEST_URL: Option<&str> = match option_env!("HERMES_DEFAULT_MANIFEST_URL") {
+    Some(u) if !u.is_empty() => Some(u),
+    _ => None,
+};
+
 /// Default manifest refresh timeout.
 const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -204,7 +211,10 @@ impl ServerDirectory {
     /// The configured manifest URL.
     #[must_use]
     pub fn manifest_url(&self) -> Option<&str> {
-        self.persisted.manifest_url.as_deref()
+        self.persisted
+            .manifest_url
+            .as_deref()
+            .or(DEFAULT_MANIFEST_URL)
     }
 
     /// Set or clear the manifest URL.
@@ -286,7 +296,7 @@ impl ServerDirectory {
     /// # Errors
     /// Fails on network or parse errors; the previous cache is kept.
     pub async fn refresh_manifest(&mut self) -> Result<bool> {
-        let Some(url) = self.persisted.manifest_url.clone() else {
+        let Some(url) = self.manifest_url().map(str::to_owned) else {
             return Ok(false);
         };
         info!(%url, "refreshing server manifest");
